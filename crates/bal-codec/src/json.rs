@@ -69,8 +69,10 @@ impl BlockAccessList {
     /// like RLP input. `null` (block not found) is an error here; callers
     /// handle "not found" before reaching the codec.
     pub fn from_rpc_json(v: &serde_json::Value) -> Result<Self, CodecError> {
-        let accounts: Vec<RpcAccount> =
-            serde_json::from_value(v.clone()).map_err(|e| CodecError::Json(e.to_string()))?;
+        // `&Value` is itself a Deserializer: no clone of the (possibly tens
+        // of MB) tree.
+        let accounts: Vec<RpcAccount> = serde::Deserialize::deserialize(v)
+            .map_err(|e: serde_json::Error| CodecError::Json(e.to_string()))?;
         let mut out = Vec::with_capacity(accounts.len());
         for a in accounts {
             out.push(AccountChanges {

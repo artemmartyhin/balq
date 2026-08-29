@@ -20,7 +20,7 @@ crates/bal-source    node access: traits + JSON-RPC + proof verification
 crates/bal-archive   storage, sync, reorgs, bootstrap
 crates/bal-layout    solc storageLayout → slots and typed values
 crates/bal-cli       `balq` — glue, no logic
-crates/bal-node      `@balq/node` — glue, no logic
+crates/bal-node      `balq` on npm — glue, no logic
 docs/                spec, decisions, audit notes
 testbed/             own contract on Platåberget = ground truth for `verify`
 ```

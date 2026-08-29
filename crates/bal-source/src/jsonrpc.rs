@@ -48,15 +48,31 @@ impl JsonRpcSource {
     /// so a stalled gateway cannot hang a sync forever; redirects are not
     /// followed, so a request never silently goes to a host you did not name.
     pub fn new(url: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_default();
+        // The builder only fails if the TLS backend cannot initialise; in that
+        // case no client would work, so a default one is no worse — but it
+        // must not silently drop the policies when they *can* be applied.
+        let client = Self::hardened_client().unwrap_or_default();
         Self {
             url: url.into(),
             client,
         }
+    }
+
+    fn hardened_client() -> reqwest::Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+    }
+
+    /// Like [`JsonRpcSource::new`] but surfaces a client-construction failure.
+    pub fn try_new(url: impl Into<String>) -> Result<Self> {
+        let client = Self::hardened_client()
+            .map_err(|e| SourceError::Transport(format!("http client: {e}")))?;
+        Ok(Self {
+            url: url.into(),
+            client,
+        })
     }
 
     /// Raw JSON-RPC call; returns the `result` member or the error object as [`SourceError::Rpc`].
@@ -298,6 +314,18 @@ pub struct ProbeReport {
     pub proof_window: std::result::Result<u64, String>,
 }
 
+/// A node that answers block N with a header numbered M would otherwise get
+/// N's records filed under M. Refuse.
+fn expect_number(h: Header, requested: u64) -> Result<Header> {
+    if h.number != requested {
+        return Err(SourceError::Malformed(format!(
+            "asked for block {requested}, node answered with block {}",
+            h.number
+        )));
+    }
+    Ok(h)
+}
+
 fn parse_hex_u64(s: &str) -> Result<u64> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     u64::from_str_radix(s, 16).map_err(|e| SourceError::Malformed(format!("u64 {s}: {e}")))
@@ -342,7 +370,7 @@ fn parse_header(v: &Value) -> Result<Header> {
 impl BalSource for JsonRpcSource {
     async fn header(&self, number: u64) -> Result<Header> {
         let v = self.raw_block(json!(format!("{number:#x}"))).await?;
-        parse_header(&v)
+        expect_number(parse_header(&v)?, number)
     }
 
     async fn head(&self) -> Result<u64> {
@@ -360,7 +388,7 @@ impl BalSource for JsonRpcSource {
 
     async fn block(&self, number: u64) -> Result<SourcedBlock> {
         let v = self.raw_block(json!(format!("{number:#x}"))).await?;
-        let header = parse_header(&v)?;
+        let header = expect_number(parse_header(&v)?, number)?;
         let bal = JsonRpcSource::bal(self, number).await?;
         Ok(SourcedBlock { header, bal })
     }

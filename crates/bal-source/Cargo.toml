@@ -13,7 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bal-codec = { version = "0.1.0", path = "../bal-codec", features = ["json"] }
+bal-codec = { version = "0.1.1", path = "../bal-codec", features = ["json"] }
 alloy-primitives = { workspace = true, features = ["serde"] }
 async-trait.workspace = true
 thiserror.workspace = true

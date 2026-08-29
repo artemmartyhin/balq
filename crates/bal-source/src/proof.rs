@@ -75,32 +75,52 @@ pub fn verify_account_proof(
         && proof.storage_hash == EMPTY_ROOT_HASH
         && proof.code_hash == alloy_primitives::KECCAK256_EMPTY);
     let expected_account = account_exists.then(|| alloy_rlp::encode(account));
-    verify_proof(
+    guarded_verify(
         state_root,
         Nibbles::unpack(keccak256(proof.address)),
         expected_account,
-        proof.account_proof.iter(),
+        &proof.account_proof,
     )
-    .map_err(|e| ProofError::Account {
+    .map_err(|reason| ProofError::Account {
         root: state_root,
-        reason: e.to_string(),
+        reason,
     })?;
 
     let mut out = Vec::with_capacity(proof.storage_proofs.len());
     for sp in &proof.storage_proofs {
         let expected = (!sp.value.is_zero()).then(|| alloy_rlp::encode(sp.value));
-        verify_proof(
+        guarded_verify(
             proof.storage_hash,
             Nibbles::unpack(keccak256(sp.key)),
             expected,
-            sp.proof.iter(),
+            &sp.proof,
         )
-        .map_err(|e| ProofError::Storage {
+        .map_err(|reason| ProofError::Storage {
             slot: sp.key,
             root: proof.storage_hash,
-            reason: e.to_string(),
+            reason,
         })?;
         out.push((sp.key, sp.value));
     }
     Ok(out)
+}
+
+/// `verify_proof` with a panic guard. The trie verifier has at least one
+/// `unreachable!()` reachable from a crafted node (an in-place extension
+/// whose child is an in-place leaf); a node must not be able to abort the
+/// process, so a panic is reported as an invalid proof instead.
+fn guarded_verify(
+    root: B256,
+    key: Nibbles,
+    expected: Option<Vec<u8>>,
+    nodes: &[alloy_primitives::Bytes],
+) -> Result<(), String> {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_proof(root, key, expected, nodes.iter())
+    }));
+    match r {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("malformed proof node (verifier panicked)".into()),
+    }
 }

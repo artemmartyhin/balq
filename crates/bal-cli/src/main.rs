@@ -153,7 +153,7 @@ enum Cmd {
         out: Option<PathBuf>,
     },
     /// Emit a TypeScript interface for a storage layout, matching what
-    /// `archive.view(addr, layout).at(block)` exposes in @balq/node.
+    /// `archive.view(addr, layout).at(block)` exposes in balq.
     Typegen {
         /// solc storageLayout JSON or a forge/hardhat artifact containing one.
         layout: PathBuf,
@@ -543,8 +543,11 @@ async fn main() -> Result<()> {
             synthetic_slots,
             out,
         } => {
-            let tmp = std::env::temp_dir().join("balq-bench");
-            std::fs::create_dir_all(&tmp)?;
+            // A private, unpredictable directory: the bench deletes and
+            // rewrites its archive file, and must never do that to a path
+            // another user could have planted.
+            let tmp_dir = tempfile::tempdir().context("creating a temp dir")?;
+            let tmp = tmp_dir.path().to_path_buf();
             let live = match rpc {
                 Some(url) => {
                     eprintln!("live: fetching {blocks} blocks from {url} …");

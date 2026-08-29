@@ -246,7 +246,7 @@ be set to the *backup's* window (unlimited for an archive endpoint).
 
 The string path (`layout.locate("balances[0x…]")`) stays as the primitive —
 the CLI needs it — but it is not the API people should write against.
-`archive.view(addr, layout).at(block)` in `@balq/node` is a `Proxy` that
+`archive.view(addr, layout).at(block)` in `balq` is a `Proxy` that
 walks the layout (`kindOf`) and reads leaves (`storageAt` + `decodeValue`),
 so `view.balances[addr]` reads like the contract. Decisions: integers are
 `bigint` (a `number` would silently lose precision), misses throw

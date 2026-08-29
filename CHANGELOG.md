@@ -23,7 +23,7 @@ and the on-disk schema (`SCHEMA_VERSION`).
   (flat, packed, struct, mapping, nested mapping, dynamic and fixed arrays).
 - `balq` CLI: `probe`, `watch`, `unwatch`, `status`, `sync [--follow]`, `get`,
   `history`, `diff [--layout]`, `verify --journal`.
-- `@balq/node`: napi-rs bindings, `NotAvailableError.code`, reads during `sync`,
+- `balq`: napi-rs bindings, `NotAvailableError.code`, reads during `sync`,
   `archive.view(addr, layout).at(block)` proxy (Solidity-style reads, `bigint`),
   `layout.typescript()`.
 - `balq typegen`: TypeScript interface from a storage layout.
@@ -42,3 +42,27 @@ and the on-disk schema (`SCHEMA_VERSION`).
 - `balq bench`: live (catch-up sync of the most-written addresses, read
   latency vs `eth_getStorageAt`) and synthetic benchmarks; writes
   `results.json` and SVG charts (`docs/bench/`, method in `docs/BENCH.md`).
+
+## [0.1.1] — 2026-08-30
+
+Security release after an independent review (`docs/SECURITY-AUDIT.md`).
+
+### Fixed
+- Node process could be killed by untrusted input: a crafted proof node
+  panicked inside the trie verifier (now caught and reported as a proof
+  error); a layout element type of zero bytes divided by zero in
+  `describe_slot`; self-referential mapping/array types overflowed the stack
+  in `typescript()` (depth now bounded on every recursion).
+- Two races could store a post-value as a pre-value under `proof`
+  provenance: `watch()` during the first sync pass, and `unwatch`/deep reorg
+  while a proof was in flight. The sync loop now claims its start block
+  before its first await, and pre-values are written only if the watch and
+  the proof block's hash are unchanged inside the transaction.
+- A node answering block N with a header numbered M is refused.
+- `find_fork` is capped at the reorg horizon; block hashes are pruned even
+  when `finalized` lags; pending retries group in O(n log n) and chunk
+  `eth_getProof` calls.
+- HTTP response bodies are capped at 64 MiB and read in chunks; redirects
+  are not followed; the BAL JSON is no longer cloned before decoding.
+- The npm publish job now generates `index.js` / `index.d.ts`; the `node`
+  dev-dependency (a binary download on every `npm ci`) is gone.

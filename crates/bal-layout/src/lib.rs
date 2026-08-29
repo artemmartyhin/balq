@@ -548,13 +548,13 @@ impl Layout {
                 let v = t
                     .value
                     .as_deref()
-                    .map(|v| self.ts_type(v, depth))
+                    .map(|v| self.ts_type(v, depth + 1))
                     .unwrap_or_else(|| "string".into());
                 format!("{{ readonly [key: string]: {v} }}")
             }
             (Encoding::DynamicArray, _, base) => {
                 let v = base
-                    .map(|b| self.ts_type(b, depth))
+                    .map(|b| self.ts_type(b, depth + 1))
                     .unwrap_or_else(|| "string".into());
                 format!("{{ readonly [index: number]: {v}; readonly length: bigint }}")
             }
@@ -573,7 +573,7 @@ impl Layout {
             (Encoding::Inplace, None, Some(base)) => {
                 format!(
                     "{{ readonly [index: number]: {} }}",
-                    self.ts_type(base, depth)
+                    self.ts_type(base, depth + 1)
                 )
             }
             (Encoding::Bytes, _, _) => "string".into(),
@@ -694,6 +694,9 @@ impl Layout {
     ) {
         let Ok(bt) = self.ty(base_ty) else { return };
         let size = bt.number_of_bytes;
+        if size == 0 {
+            return; // a crafted layout; never divide by it
+        }
         if size >= 32 {
             let per_elem = size.div_ceil(32) as u64;
             let i = (target - data).to::<u64>() / per_elem;
@@ -876,6 +879,28 @@ mod tests {
         let l = Layout::from_json(json).unwrap();
         let ts = l.typescript("Evil");
         assert!(ts.contains("unknown"), "recursion must be cut, got:\n{ts}");
+
+        // The same through mapping / array / fixed-array self-references,
+        // plus an element type of zero bytes.
+        let json2 = r#"{
+          "storage": [
+            {"label":"m","slot":"0","offset":0,"type":"t_m"},
+            {"label":"d","slot":"1","offset":0,"type":"t_d"},
+            {"label":"f","slot":"2","offset":0,"type":"t_f"},
+            {"label":"z","slot":"3","offset":0,"type":"t_z"}],
+          "types": {
+            "t_m": {"encoding":"mapping","label":"mapping(uint256 => m)","numberOfBytes":"32","key":"t_uint256","value":"t_m"},
+            "t_d": {"encoding":"dynamic_array","label":"d[]","numberOfBytes":"32","base":"t_d"},
+            "t_f": {"encoding":"inplace","label":"f[2]","numberOfBytes":"64","base":"t_f"},
+            "t_z": {"encoding":"dynamic_array","label":"zero[]","numberOfBytes":"32","base":"t_zero"},
+            "t_zero": {"encoding":"inplace","label":"uint0","numberOfBytes":"0"},
+            "t_uint256": {"encoding":"inplace","label":"uint256","numberOfBytes":"32"}
+          }}"#;
+        let l2 = Layout::from_json(json2).unwrap();
+        let _ = l2.typescript("Evil2");
+        let data = U256::from_be_bytes(keccak256(U256::from(3).to_be_bytes::<32>()).0);
+        let _ = l2.describe_slot(slot_b(data), 16); // zero-byte element: no division by zero
+        let _ = l2.describe_slot(s(2), 16);
         let names = l.describe_slot(s(1), 16);
         assert!(names.iter().any(|(n, _)| n.ends_with(".n")));
         // path resolution itself is iterative and bounded by the path length

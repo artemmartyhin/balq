@@ -464,6 +464,25 @@ impl Archive {
         self.watchlist()
     }
 
+    /// Decide where a sync pass starts, under the watch gate, and publish it
+    /// as the in-flight block *before* the pass awaits anything. Without
+    /// this, a `watch()` with a start below the pass's first block could be
+    /// accepted while the pass is fetching, and its early blocks skipped.
+    /// Returns `None` if nothing is watched.
+    pub(crate) fn claim_start(&self) -> Result<Option<u64>> {
+        let _gate = self.watch_gate.lock().unwrap_or_else(|p| p.into_inner());
+        let earliest = self.watchlist()?.iter().map(|(_, s)| *s).min();
+        let Some(earliest) = earliest else {
+            return Ok(None);
+        };
+        let next = match self.head()? {
+            Some((h, _)) => h + 1,
+            None => earliest,
+        };
+        self.in_flight.store(next, Ordering::SeqCst);
+        Ok(Some(next))
+    }
+
     /// Release the sync slot and the in-flight marker. Always called when a
     /// pass ends, successfully or not.
     pub(crate) fn sync_idle(&self) {
@@ -682,11 +701,27 @@ impl Archive {
         addr: Address,
         start: u64,
         proof_block: u64,
+        proof_block_hash: B256,
         values: &[(B256, B256)],
     ) -> Result<usize> {
         let mut written = 0;
         let txn = self.db.begin_write()?;
         {
+            // The proof was taken against a watch and a block. If either
+            // changed while it was in flight (unwatch + watch, a reorg that
+            // replaced the block), the values describe nothing we hold.
+            let watch = txn.open_table(WATCH)?;
+            if watch.get(addr.as_slice())?.map(|v| v.value()) != Some(start) {
+                return Ok(0);
+            }
+            let hashes = txn.open_table(HASHES)?;
+            let same_block = hashes
+                .get(proof_block)?
+                .map(|v| v.value().len() == 64 && v.value()[..32] == proof_block_hash[..])
+                .unwrap_or(false);
+            if !same_block {
+                return Ok(0);
+            }
             let mut slots = txn.open_table(SLOTS)?;
             let mut boot = txn.open_table(BOOT)?;
             let mut pending = txn.open_table(PENDING)?;
@@ -720,6 +755,9 @@ impl Archive {
     pub(crate) fn mark_lost(&self, addr: Address, slots: &[B256], first_seen: u64) -> Result<()> {
         let txn = self.db.begin_write()?;
         {
+            if txn.open_table(WATCH)?.get(addr.as_slice())?.is_none() {
+                return Ok(()); // unwatched meanwhile; nothing to mark
+            }
             let mut boot = txn.open_table(BOOT)?;
             let mut pending = txn.open_table(PENDING)?;
             for slot in slots {

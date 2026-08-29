@@ -4,12 +4,19 @@
 use crate::{Archive, ArchiveError, Result};
 use alloy_primitives::{Address, B256};
 use bal_source::{check_requested, verify_account_proof, BalSource, SourceError, StateSource};
+use std::collections::BTreeMap;
 use tracing::{debug, info, warn};
 
 /// Block hashes retained behind the head when the source has no
-/// `finalized` tag. Deeper reorgs than this are refused as
-/// [`ArchiveError::ReorgBeyondHorizon`] rather than guessed.
+/// `finalized` tag, and the deepest reorg `find_fork` will walk. Deeper
+/// reorgs are refused as [`ArchiveError::ReorgBeyondHorizon`] rather than
+/// guessed or walked one RPC call at a time forever.
 pub const REORG_HORIZON_FALLBACK: u64 = 4096;
+
+/// Slots per `eth_getProof` call. Nodes refuse very large requests; a block
+/// touching thousands of fresh slots must not turn all of them into
+/// `Pending` because one request was too big.
+const PROOF_CHUNK: usize = 256;
 
 /// What one [`Archive::sync`] pass did.
 #[derive(Debug, Default, Clone)]
@@ -34,6 +41,16 @@ pub struct SyncReport {
     pub unverified_blocks: u64,
 }
 
+/// Releases the sync slot when the pass ends — by return, error, or the
+/// future being dropped.
+struct SyncGuard<'a>(&'a Archive);
+
+impl Drop for SyncGuard<'_> {
+    fn drop(&mut self) {
+        self.0.sync_idle();
+    }
+}
+
 impl Archive {
     /// Sync from the archive head (or the earliest watch start) to the
     /// source head. `state` enables early bootstrap; without it, first-seen
@@ -50,9 +67,8 @@ impl Archive {
         if !self.begin_sync() {
             return Err(ArchiveError::SyncInProgress);
         }
-        let result = self.sync_inner(source, state).await;
-        self.sync_idle();
-        result
+        let _guard = SyncGuard(self);
+        self.sync_inner(source, state).await
     }
 
     async fn sync_inner<S: BalSource + ?Sized>(
@@ -61,46 +77,43 @@ impl Archive {
         state: Option<&dyn StateSource>,
     ) -> Result<SyncReport> {
         let mut report = SyncReport::default();
-        let Some(earliest_start) = self.watchlist()?.iter().map(|(_, s)| *s).min() else {
+        // Claim the start block before the first await so that no `watch()`
+        // below it can be accepted while we are fetching.
+        let Some(mut next) = self.claim_start()? else {
             return Ok(report);
         };
         let src_head = source.head().await?;
-        // Reorg horizon: the node's `finalized` tag, or — for nodes without
-        // one — a fixed distance, so the header table cannot grow without
-        // bound. Only the retained range can be rolled back to.
+        // Reorg horizon: the node's `finalized` tag, clamped to its head
+        // (a node cannot prune our head by claiming a finalized block above
+        // it) and never further back than the fallback horizon (so the
+        // header table cannot grow without bound if `finalized` stalls).
+        let horizon_floor = src_head.saturating_sub(REORG_HORIZON_FALLBACK);
         let finalized = match source.finalized().await {
-            // A node cannot be allowed to prune our head by claiming a
-            // finalized block above it.
-            Ok(f) => Some(f.min(src_head)),
+            Ok(f) => f.min(src_head).max(horizon_floor),
             Err(e) => {
                 debug!(%e, "no finalized tag; using fixed reorg horizon");
-                Some(src_head.saturating_sub(REORG_HORIZON_FALLBACK))
+                horizon_floor
             }
         };
 
-        let mut next = match self.head()? {
-            Some((h, hash)) => {
-                // Head still canonical? Header only — the BAL is not needed.
-                let cur = match source.header(h).await {
-                    Ok(hdr) => hdr,
-                    Err(SourceError::BlockNotFound(_)) => {
-                        debug!(head = h, "head not served by upstream yet; skipping pass");
-                        return Ok(report);
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                if cur.hash != hash {
-                    let fork = self.find_fork(source, h).await?;
-                    warn!(head = h, fork, "reorg detected at start of sync");
-                    self.rollback_to(fork)?;
-                    report.reorged_to = Some(fork);
-                    fork + 1
-                } else {
-                    h + 1
+        if let Some((h, hash)) = self.head()? {
+            // Head still canonical? Header only — the BAL is not needed.
+            let cur = match source.header(h).await {
+                Ok(hdr) => hdr,
+                Err(SourceError::BlockNotFound(_)) => {
+                    debug!(head = h, "head not served by upstream yet; skipping pass");
+                    return Ok(report);
                 }
+                Err(e) => return Err(e.into()),
+            };
+            if cur.hash != hash {
+                let fork = self.find_fork(source, h).await?;
+                warn!(head = h, fork, "reorg detected at start of sync");
+                self.rollback_to(fork)?;
+                report.reorged_to = Some(fork);
+                next = fork + 1;
             }
-            None => earliest_start,
-        };
+        }
         report.from = Some(next);
 
         // Guards against a source that keeps contradicting itself about the
@@ -117,6 +130,12 @@ impl Archive {
                 Err(e) => return Err(e.into()),
             };
             let header = blk.header.clone();
+            if header.number != next {
+                return Err(ArchiveError::Source(SourceError::Malformed(format!(
+                    "asked for block {next}, source answered with block {}",
+                    header.number
+                ))));
+            }
 
             // Parent linkage against what we stored.
             if let Some((stored_hash, _)) = self.header_at(next - 1)? {
@@ -157,7 +176,7 @@ impl Archive {
             // refused for this block.
             let watches = self.watchlist_for(next)?;
             let prune_below =
-                finalized.map(|f| f.min(src_head.saturating_sub(self.config.bootstrap_window + 1)));
+                Some(finalized.min(src_head.saturating_sub(self.config.bootstrap_window + 1)));
             let (fresh, written) =
                 self.apply_block(&header, &blk.bal, &watches, verified, prune_below)?;
             report.slots_written += written;
@@ -168,18 +187,21 @@ impl Archive {
             // Early bootstrap: prove pre-values at `next - 1` while the node
             // still has that state. Failure leaves the slot Pending.
             if !fresh.is_empty() {
-                let prev_root = match state {
+                let prev = match state {
                     None => None,
-                    Some(_) => self.root_of(source, next - 1).await,
+                    Some(_) => self.header_of(source, next - 1).await,
                 };
                 for (addr, start, slots) in &fresh {
-                    match (state, prev_root) {
-                        (Some(st), Some(root)) => {
+                    match (state, prev) {
+                        (Some(st), Some((hash, root))) => {
                             match self
-                                .bootstrap_at(st, root, *addr, *start, slots, next - 1)
+                                .bootstrap_at(st, root, hash, *addr, *start, slots, next - 1)
                                 .await
                             {
-                                Ok(n) => report.bootstrapped += n,
+                                Ok(n) => {
+                                    report.bootstrapped += n;
+                                    report.bootstrap_pending += slots.len() - n;
+                                }
                                 Err(e) => {
                                     warn!(%addr, block = next, %e, "early bootstrap failed; left pending");
                                     report.bootstrap_pending += slots.len();
@@ -206,11 +228,15 @@ impl Archive {
         Ok(report)
     }
 
-    /// State root of `block`: from the stored headers, or fetched from the
-    /// source and remembered. `None` if neither works.
-    async fn root_of<S: BalSource + ?Sized>(&self, source: &S, block: u64) -> Option<B256> {
+    /// `(hash, state_root)` of `block`: from the stored headers, or fetched
+    /// from the source and remembered. `None` if neither works.
+    async fn header_of<S: BalSource + ?Sized>(
+        &self,
+        source: &S,
+        block: u64,
+    ) -> Option<(B256, B256)> {
         match self.header_at(block) {
-            Ok(Some((_, root))) => return Some(root),
+            Ok(Some(h)) => return Some(h),
             Ok(None) => {}
             Err(e) => {
                 warn!(block, %e, "cannot read stored header");
@@ -222,7 +248,7 @@ impl Archive {
                 if let Err(e) = self.remember_header(block, h.hash, h.state_root) {
                     warn!(block, %e, "cannot remember header");
                 }
-                Some(h.state_root)
+                Some((h.hash, h.state_root))
             }
             Err(e) => {
                 warn!(block, %e, "cannot fetch header for proof root");
@@ -231,8 +257,10 @@ impl Archive {
         }
     }
 
-    /// Walk back from `from` until a stored hash matches the source.
+    /// Walk back from `from` until a stored hash matches the source, at most
+    /// [`REORG_HORIZON_FALLBACK`] blocks.
     async fn find_fork<S: BalSource + ?Sized>(&self, source: &S, from: u64) -> Result<u64> {
+        let floor = from.saturating_sub(REORG_HORIZON_FALLBACK);
         let mut b = from;
         loop {
             let Some((stored, _)) = self.header_at(b)? else {
@@ -242,32 +270,39 @@ impl Archive {
             if live == stored {
                 return Ok(b);
             }
-            if b == 0 {
-                return Err(ArchiveError::ReorgBeyondHorizon(0));
+            if b == 0 || b <= floor {
+                return Err(ArchiveError::ReorgBeyondHorizon(b));
             }
             b -= 1;
         }
     }
 
-    /// Fetch and verify proofs for exactly `slots` at `block`, store the
-    /// ones that are genuine pre-values. Returns how many were stored.
+    /// Fetch and verify proofs for exactly `slots` at `block` (in chunks),
+    /// store the ones that are genuine pre-values. Returns how many were
+    /// stored.
+    #[allow(clippy::too_many_arguments)]
     async fn bootstrap_at(
         &self,
         state: &dyn StateSource,
         state_root: B256,
+        block_hash: B256,
         addr: Address,
         start: u64,
         slots: &[B256],
         block: u64,
     ) -> Result<usize> {
-        let proof = state.proof(addr, slots, block).await?;
-        check_requested(slots, &proof)?;
-        let values = verify_account_proof(state_root, &proof)?;
-        let values: Vec<(B256, B256)> = values
-            .into_iter()
-            .map(|(k, v)| (k, B256::from(v.to_be_bytes::<32>())))
-            .collect();
-        self.put_bootstrap(addr, start, block, &values)
+        let mut stored = 0;
+        for chunk in slots.chunks(PROOF_CHUNK) {
+            let proof = state.proof(addr, chunk, block).await?;
+            check_requested(chunk, &proof)?;
+            let values = verify_account_proof(state_root, &proof)?;
+            let values: Vec<(B256, B256)> = values
+                .into_iter()
+                .map(|(k, v)| (k, B256::from(v.to_be_bytes::<32>())))
+                .collect();
+            stored += self.put_bootstrap(addr, start, block, block_hash, &values)?;
+        }
+        Ok(stored)
     }
 
     /// Returns `(proven, still pending, newly lost)`.
@@ -285,32 +320,30 @@ impl Archive {
         let start_of = |a: Address| watches.iter().find(|(x, _)| *x == a).map(|(_, s)| *s);
         let (mut ok, mut still, mut lost) = (0, 0, 0);
         // Group by (addr, first_seen) → one proof call each.
-        let mut groups: Vec<(Address, u64, Vec<B256>)> = Vec::new();
+        let mut groups: BTreeMap<(Address, u64), Vec<B256>> = BTreeMap::new();
         for (addr, slot, first_seen) in pending {
-            match groups
-                .iter_mut()
-                .find(|(a, f, _)| *a == addr && *f == first_seen)
-            {
-                Some(g) => g.2.push(slot),
-                None => groups.push((addr, first_seen, vec![slot])),
-            }
+            groups.entry((addr, first_seen)).or_default().push(slot);
         }
-        for (addr, first_seen, slots) in groups {
+        for ((addr, first_seen), slots) in groups {
             let Some(start) = start_of(addr) else {
                 continue;
             };
-            let at = first_seen - 1;
+            // `first_seen` is written by `apply_block` for blocks >= start >= 1;
+            // a zero can only come from a tampered file.
+            let Some(at) = first_seen.checked_sub(1) else {
+                return Err(ArchiveError::Corrupt("pending first_seen"));
+            };
             if src_head.saturating_sub(at) > self.config.bootstrap_window {
                 self.mark_lost(addr, &slots, first_seen)?;
                 lost += slots.len();
                 continue;
             }
-            let Some(root) = self.root_of(source, at).await else {
+            let Some((hash, root)) = self.header_of(source, at).await else {
                 still += slots.len();
                 continue;
             };
             match self
-                .bootstrap_at(state, root, addr, start, &slots, at)
+                .bootstrap_at(state, root, hash, addr, start, &slots, at)
                 .await
             {
                 Ok(n) => {
@@ -331,9 +364,10 @@ impl Archive {
     /// BAL completeness) and store it as the pre-value.
     ///
     /// The head is read *before* the slot's state is checked, and the write
-    /// is skipped if a change at or before that head has been recorded in
-    /// the meantime — a sync running concurrently cannot turn a post-value
-    /// into a stored pre-value.
+    /// is skipped if a change at or before that head has been recorded, if
+    /// the watch changed, or if the head block was replaced in the meantime —
+    /// a sync running concurrently cannot turn a post-value into a stored
+    /// pre-value.
     pub async fn bootstrap_slot(
         &self,
         state: &dyn StateSource,
@@ -350,10 +384,10 @@ impl Archive {
         if self.boot_state(addr, slot)?.is_some() {
             return Ok(()); // seen or proven already; nothing to do
         }
-        let (_, root) = self
+        let (hash, root) = self
             .header_at(head)?
             .ok_or(ArchiveError::ReorgBeyondHorizon(head))?;
-        self.bootstrap_at(state, root, addr, start, &[slot], head)
+        self.bootstrap_at(state, root, hash, addr, start, &[slot], head)
             .await?;
         Ok(())
     }

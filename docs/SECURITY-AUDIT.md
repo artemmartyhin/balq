@@ -14,7 +14,7 @@ findings that were accepted as out of scope are listed with the reason.
 | A backup node / archive provider | supply BAL bodies and proofs | anything beyond what the primary can — bodies are checked against the primary's header, proofs against a stored `state_root` |
 | Author of a layout file | shape how slots are named and decoded | crash the process, read outside the archive |
 | Author of a journal / CLI arguments | drive `verify`, `get`, … | crash the process |
-| A JS caller of `@balq/node` | pass any strings/numbers | crash the Node process (a Rust panic aborts it) |
+| A JS caller of `balq` | pass any strings/numbers | crash the Node process (a Rust panic aborts it) |
 | A crafted archive file | be opened | be silently accepted as consistent |
 
 Not defended against: a primary node that lies about which chain is
@@ -90,7 +90,31 @@ confirmed and fixed.)
 
 - `cargo audit`: no vulnerabilities; two unmaintained transitive crates via
   alloy (`derivative`, `paste`).
-- `npm audit` for `@balq/node`: 0 vulnerabilities.
+- `npm audit` for `balq`: 0 vulnerabilities.
 - `cargo machete`: no unused dependencies.
 - CI runs with the default `GITHUB_TOKEN` (read-only for PRs); publishing
   requires an `NPM_TOKEN` secret and only on `node-v*` tags.
+
+## Independent review pass — findings (all fixed in 0.1.1 unless noted)
+
+| # | Severity | Finding | Fix |
+|---|---|---|---|
+| 5 | high (Node) | `alloy-trie::verify_proof` has a reachable `unreachable!()` on a crafted in-place extension node; a node could abort the process through a proof | `verify_proof` wrapped in `catch_unwind`; a panic is reported as an invalid proof |
+| 6 | high (Node) | `describe_slot` divided by zero for an array element type with `numberOfBytes: 0` | guarded; test |
+| 7 | high (Node) | `typescript()` recursed without bound through self-referential mapping / array / fixed-array types (the earlier depth guard only covered structs) | depth incremented on every recursion; test with all four shapes |
+| 8 | medium | `watch()` with a start below the first pass's block could be accepted while the pass was fetching, its early blocks skipped, and a later lazy proof stored a post-value as the pre-value | `claim_start()` publishes the in-flight block under the gate before the first await |
+| 9 | medium | `unwatch`+`watch` or a deep reorg while a proof was in flight left a stale `Done` pre-value | `put_bootstrap` re-checks the watch start and the proof block's hash inside its transaction; `mark_lost` re-checks the watch |
+| 10 | low–medium | Header `number` from the node was never compared with the requested number; mis-routed answers would be filed under the wrong block | checked in the source and again before apply |
+| 11 | medium | `from_rpc_json` cloned the whole JSON tree (several × the 64 MiB cap in memory) | deserialised from `&Value` without cloning |
+| 12 | low–medium | `find_fork` walked back one RPC call per block without a cap; `HASHES` grew unbounded if `finalized` stalled | walk capped and pruning floored at `REORG_HORIZON_FALLBACK` |
+| 13 | low | `retry_pending` grouping was O(P·G); one `eth_getProof` per (address, block) with an unbounded slot list | `BTreeMap` grouping; 256 slots per call |
+| 14 | low | `sync()` not cancel-safe: a dropped future left `syncing` set | RAII guard |
+| 15 | low | corrupt `first_seen = 0` in the pending table underflowed | `checked_sub` → `Corrupt` |
+| 16 | low | `bench` used a predictable shared temp directory and deleted a file in it | `tempfile::tempdir()` |
+| 17 | medium (release) | npm publish job never generated `index.js` / `index.d.ts`; the published package would not load | loader uploaded as an artifact from the Linux build and verified before `prepublish` |
+| 18 | low–medium | `node` npm dev-dependency ran a binary download on every `npm ci`, including in the publish job | removed; `npm ci --ignore-scripts` in CI |
+| 19 | low | workflows had no `permissions:` block | `contents: read` |
+
+Accepted / deferred: `unwatch` and `rollback_to` collect keys into a `Vec` before deleting (memory proportional to the address; correctness unaffected); `bootstrap_slot` can be called in unbounded parallel from JS (bounded only by the node); header self-hash remains the open trust gap noted above.
+
+Reviewed and found sound by the second reader: BAL hash binding and canonicalisation through the RLP encoder; proof slot matching and exclusion proofs; reorg detection and rollback including the below-`start-1` wipe; transport caps; key layout and prefix ranges; `decode` bounds; Node number/string validation; async panics in the binding surfacing as rejected promises.

@@ -1,6 +1,6 @@
 {
-  "name": "@balq/node",
-  "version": "0.1.0",
+  "name": "balq",
+  "version": "0.1.1",
   "description": "Local, verified archive of contract storage built from EIP-7928 BALs — Node.js bindings",
   "main": "lib.js",
   "types": "lib.d.ts",
@@ -30,7 +30,6 @@
     "test": "node test/smoke.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3",
-    "node": "^22.23.2"
+    "@napi-rs/cli": "^3"
   }
 }

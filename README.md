@@ -17,7 +17,7 @@ balq get   0x3582… --layout Playground.json --field "balances[0x61Cc…]" --bl
 ```
 
 ```js
-const view = archive.view(proxy, layout).at(114591);   // @balq/node
+const view = archive.view(proxy, layout).at(114591);   // balq
 view.balances[addr]   // 37585n  — reads like the contract, at any block
 ```
 
@@ -97,7 +97,7 @@ flowchart LR
     B[backup archive RPC<br/>optional] -. "only what the primary<br/>cannot serve, verified" .-> A
     A --> L[bal-layout<br/>solc storageLayout → names]
     L --> CLI[balq CLI]
-    L --> JS["@balq/node<br/>view.balances[addr]"]
+    L --> JS["balq<br/>view.balances[addr]"]
 ```
 
 - **Keys** `addr ‖ slot ‖ block ‖ index` — a historical read is one ordered
@@ -115,7 +115,7 @@ flowchart LR
 
 ```
 cargo install --path crates/bal-cli           # balq
-npm i @balq/node                              # Node bindings (prebuilt for 5 platforms)
+npm i balq                              # Node bindings (prebuilt for 5 platforms)
 ```
 
 Rust crates: `bal-codec`, `bal-source`, `bal-archive`, `bal-layout`.
@@ -141,7 +141,7 @@ storageLayout`, or a forge/hardhat artifact) — not the ABI.
 ### Node
 
 ```js
-const { Archive, Layout, NotAvailableError } = require("@balq/node");
+const { Archive, Layout, NotAvailableError } = require("balq");
 const ar = Archive.open("./balq.redb", { proofWindow: 0 });
 ar.watch(proxy, 114563);
 await ar.sync(rpcUrl, true, backupRpc);              // reads keep working meanwhile
