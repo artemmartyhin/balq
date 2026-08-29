@@ -181,7 +181,7 @@ try { ar.view(proxy, layout).at(1).counter } catch (e) { e.code }          // "B
 
 ```
 crates/            bal-codec · bal-source · bal-archive · bal-layout · bal-cli · bal-node
-docs/              SPEC.md · DECISIONS.md · BENCH.md · bench/
+docs/              SPEC.md · DECISIONS.md · BENCH.md · SECURITY-AUDIT.md · bench/
 testbed/           own contract on Platåberget + journal = ground truth for `verify` (96/96)
 .github/           ci: fmt · clippy · rustdoc · tests on 3 OSes · MSRV · live probe; npm prebuilds
 ```

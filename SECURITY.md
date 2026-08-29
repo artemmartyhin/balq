@@ -14,6 +14,8 @@ Things that are **not** verified today and should be read as such:
 - the block header itself (`keccak(rlp(header)) == blockHash`);
 - anything stored with `Provenance::Imported` or `Provenance::Unverified`.
 
+See `docs/SECURITY-AUDIT.md` for the threat model, the surfaces, and what was found and fixed.
+
 ## Reporting
 
 Report vulnerabilities by e-mail to artemmartyhin@gmail.com. Please include a

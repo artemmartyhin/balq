@@ -55,6 +55,10 @@ pub enum LayoutError {
 /// Result of layout operations.
 pub type Result<T> = std::result::Result<T, LayoutError>;
 
+/// Deepest struct/array nesting followed. Real layouts are a few levels;
+/// a self-referential type in a crafted file would otherwise recurse forever.
+const MAX_NESTING: usize = 32;
+
 /// One variable (or struct member) as solc reports it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -529,6 +533,11 @@ impl Layout {
     }
 
     fn ts_type(&self, type_id: &str, depth: usize) -> String {
+        // A crafted layout can reference itself; solc never emits that, but a
+        // file is not solc. Stop instead of overflowing the stack.
+        if depth > MAX_NESTING {
+            return "unknown".into();
+        }
         let Ok(t) = self.ty(type_id) else {
             return "string".into();
         };
@@ -607,6 +616,10 @@ impl Layout {
         probe: u64,
         out: &mut Vec<(String, Location)>,
     ) {
+        // Recursion depth is bounded by the path length being built.
+        if name.matches(['.', '[']).count() > MAX_NESTING {
+            return;
+        }
         let Ok(t) = self.ty(type_id) else { return };
         match (t.encoding, t.members.as_deref(), t.base.as_deref()) {
             (Encoding::Inplace, Some(members), _) => {
@@ -846,6 +859,27 @@ mod tests {
         assert!(ts.contains(
             "readonly totals: {\n    readonly lastTime: bigint;\n    readonly index: bigint;\n  };"
         ));
+    }
+
+    /// A layout is a file, not solc: a type that contains itself must not
+    /// recurse forever in `typescript()` or `describe_slot()`.
+    #[test]
+    fn self_referential_layout_terminates() {
+        let json = r#"{
+          "storage": [{"label":"a","slot":"0","offset":0,"type":"t_struct(A)"}],
+          "types": {
+            "t_struct(A)": {"encoding":"inplace","label":"struct A","numberOfBytes":"64",
+              "members":[{"label":"inner","slot":"0","offset":0,"type":"t_struct(A)"},
+                         {"label":"n","slot":"1","offset":0,"type":"t_uint256"}]},
+            "t_uint256": {"encoding":"inplace","label":"uint256","numberOfBytes":"32"}
+          }}"#;
+        let l = Layout::from_json(json).unwrap();
+        let ts = l.typescript("Evil");
+        assert!(ts.contains("unknown"), "recursion must be cut, got:\n{ts}");
+        let names = l.describe_slot(s(1), 16);
+        assert!(names.iter().any(|(n, _)| n.ends_with(".n")));
+        // path resolution itself is iterative and bounded by the path length
+        assert!(l.locate("a.inner.inner.n").is_ok());
     }
 
     #[test]

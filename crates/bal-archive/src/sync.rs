@@ -69,7 +69,9 @@ impl Archive {
         // one — a fixed distance, so the header table cannot grow without
         // bound. Only the retained range can be rolled back to.
         let finalized = match source.finalized().await {
-            Ok(f) => Some(f),
+            // A node cannot be allowed to prune our head by claiming a
+            // finalized block above it.
+            Ok(f) => Some(f.min(src_head)),
             Err(e) => {
                 debug!(%e, "no finalized tag; using fixed reorg horizon");
                 Some(src_head.saturating_sub(REORG_HORIZON_FALLBACK))

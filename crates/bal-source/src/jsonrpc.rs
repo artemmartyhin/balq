@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 pub const BAL_HASH_FIELD: &str = "blockAccessListHash";
 /// JSON-RPC method serving the BAL body (execution-apis).
 pub const BAL_METHOD: &str = "eth_getBlockAccessList";
+/// Largest JSON-RPC response body accepted, in bytes.
+pub const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// [`BalSource`] + [`StateSource`] over plain JSON-RPC. One request per call;
 /// no batching, no retries — callers own that policy.
@@ -43,10 +45,12 @@ struct RpcError {
 
 impl JsonRpcSource {
     /// Talk to the JSON-RPC endpoint at `url`. Requests time out after 30 s
-    /// so a stalled gateway cannot hang a sync forever.
+    /// so a stalled gateway cannot hang a sync forever; redirects are not
+    /// followed, so a request never silently goes to a host you did not name.
     pub fn new(url: impl Into<String>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         Self {
@@ -74,10 +78,32 @@ impl JsonRpcSource {
                 self.url
             )));
         }
-        let resp: RpcResponse = http
-            .json()
+        // Read the body with a hard cap: a node must not be able to make us
+        // allocate without bound. The EIP caps a BAL at 8 MiB of RLP; its
+        // JSON form is a few times larger. 64 MiB is generous.
+        if let Some(len) = http.content_length() {
+            if len > MAX_BODY_BYTES {
+                return Err(SourceError::Transport(format!(
+                    "{method}: response of {len} bytes exceeds the {MAX_BODY_BYTES}-byte limit"
+                )));
+            }
+        }
+        let mut http = http;
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = http
+            .chunk()
             .await
-            .map_err(|e| SourceError::Transport(format!("{method}: {e}")))?;
+            .map_err(|e| SourceError::Transport(format!("{method}: {e}")))?
+        {
+            if body.len() + chunk.len() > MAX_BODY_BYTES as usize {
+                return Err(SourceError::Transport(format!(
+                    "{method}: response exceeds the {MAX_BODY_BYTES}-byte limit"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let resp: RpcResponse = serde_json::from_slice(&body)
+            .map_err(|e| SourceError::Malformed(format!("{method}: {e}")))?;
         if let Some(e) = resp.error {
             return Err(SourceError::Rpc {
                 code: e.code,
