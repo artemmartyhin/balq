@@ -253,3 +253,12 @@ so `view.balances[addr]` reads like the contract. Decisions: integers are
 `NotAvailableError` (an `undefined` would let `?? 0n` violate promise #3),
 unknown fields throw at access. `balq typegen` / `layout.typescript()`
 emit a TypeScript interface so field names are checked at compile time.
+
+## Benchmarks (2026-08-29, late)
+
+`balq bench` measures rather than estimates; results in `BENCH.md`. The
+one number that contradicts the spec is disk cost: 417–540 B/record vs the
+~90 B estimate. Cause: three tables per changed slot plus redb page
+overhead. Recorded as a known limitation with the fix order (drop the
+bootstrap entry once `Done`, pack the block index, compact) rather than
+tuned away before release.

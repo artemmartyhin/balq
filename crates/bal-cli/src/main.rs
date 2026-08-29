@@ -1,6 +1,8 @@
 //! `balq` — glue only. Every line here calls into a crate below; nothing is
 //! decided here.
 
+mod bench;
+
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{anyhow, Context, Result};
 use bal_archive::{Archive, ArchiveConfig, NotAvailable, Provenance, StorageValue};
@@ -120,6 +122,35 @@ enum Cmd {
         /// Also print every matching row.
         #[arg(long)]
         show_matches: bool,
+    },
+    /// Measure: catch-up sync of the last N blocks for the most active
+    /// addresses (live), or an in-memory chain (synthetic). Emits a Markdown
+    /// table and, with --out, results.json + SVG charts.
+    Bench {
+        /// Live mode: JSON-RPC endpoint. Omit for synthetic only.
+        #[arg(long)]
+        rpc: Option<String>,
+        /// Live: how many recent blocks to replay.
+        #[arg(long, default_value_t = 300)]
+        blocks: u64,
+        /// Live: watch the N addresses with the most storage writes.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        /// Random reads to time.
+        #[arg(long, default_value_t = 5000)]
+        samples: usize,
+        /// Synthetic: blocks to generate (0 = skip synthetic).
+        #[arg(long, default_value_t = 500)]
+        synthetic_blocks: u64,
+        /// Synthetic: accounts per block.
+        #[arg(long, default_value_t = 100)]
+        synthetic_accounts: usize,
+        /// Synthetic: changed slots per account per block.
+        #[arg(long, default_value_t = 20)]
+        synthetic_slots: usize,
+        /// Directory for results.json and SVG charts.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Emit a TypeScript interface for a storage layout, matching what
     /// `archive.view(addr, layout).at(block)` exposes in @balq/node.
@@ -499,6 +530,49 @@ async fn main() -> Result<()> {
                         Err(e) => na_short(e),
                     };
                     println!("{name:<32} {} -> {}", dec(&before), dec(&after));
+                }
+            }
+        }
+        Cmd::Bench {
+            rpc,
+            blocks,
+            top,
+            samples,
+            synthetic_blocks,
+            synthetic_accounts,
+            synthetic_slots,
+            out,
+        } => {
+            let tmp = std::env::temp_dir().join("balq-bench");
+            std::fs::create_dir_all(&tmp)?;
+            let live = match rpc {
+                Some(url) => {
+                    eprintln!("live: fetching {blocks} blocks from {url} …");
+                    Some(bench::live(&url, blocks, top, samples, &tmp).await?)
+                }
+                None => None,
+            };
+            let synth = if synthetic_blocks > 0 {
+                eprintln!("synthetic: {synthetic_blocks} blocks × {synthetic_accounts} accounts × {synthetic_slots} slots …");
+                Some(
+                    bench::synthetic_run(
+                        synthetic_blocks,
+                        synthetic_accounts,
+                        synthetic_slots,
+                        samples,
+                        &tmp,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            for r in live.iter().chain(synth.iter()) {
+                println!("{}", bench::markdown(r));
+            }
+            if let Some(dir) = out {
+                for p in bench::write_outputs(&dir, live.as_ref(), synth.as_ref())? {
+                    eprintln!("wrote {}", p.display());
                 }
             }
         }

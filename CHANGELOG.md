@@ -39,3 +39,6 @@ and the on-disk schema (`SCHEMA_VERSION`).
   reported as `BootstrapLost`.
 - Header self-hash (`keccak(rlp(header)) == blockHash`) is not checked yet.
 - EIP-7928 is in Review; the wire format may change.
+- `balq bench`: live (catch-up sync of the most-written addresses, read
+  latency vs `eth_getStorageAt`) and synthetic benchmarks; writes
+  `results.json` and SVG charts (`docs/bench/`, method in `docs/BENCH.md`).
