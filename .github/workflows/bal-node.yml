@@ -88,8 +88,17 @@ jobs:
           path: crates/bal-node/artifacts
       - run: test -f index.js && test -f index.d.ts
         working-directory: crates/bal-node
-      - run: npx napi create-npm-dirs && npx napi artifacts && npx napi prepublish -t npm --no-gh-release
+      - run: npx napi create-npm-dirs && npx napi artifacts
         working-directory: crates/bal-node
+      - run: ls -R npm | head -40
+        working-directory: crates/bal-node
+      # `prepublish` publishes the per-platform packages itself, so it needs
+      # the token too — not only the final `npm publish` of the main package.
+      - run: npx napi prepublish -t npm --no-gh-release
+        working-directory: crates/bal-node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       - run: npm publish --access public
         working-directory: crates/bal-node
         env:
