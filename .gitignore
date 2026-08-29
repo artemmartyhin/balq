@@ -1,0 +1,15 @@
+/target
+*.redb
+/data
+testbed/.env
+testbed/out
+testbed/cache
+testbed/journal.jsonl
+testbed/node_modules
+crates/bal-node/node_modules
+crates/bal-node/*.node
+crates/bal-node/index.js
+crates/bal-node/index.d.ts
+testbed/deploy.json
+testbed/state.json
+testbed/sync.log

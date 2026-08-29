@@ -1,0 +1,158 @@
+{
+ "storage": [
+  {
+   "astId": 4,
+   "contract": "src/Playground.sol:Playground",
+   "label": "counter",
+   "offset": 0,
+   "slot": "0",
+   "type": "t_uint256"
+  },
+  {
+   "astId": 6,
+   "contract": "src/Playground.sol:Playground",
+   "label": "a",
+   "offset": 0,
+   "slot": "1",
+   "type": "t_uint128"
+  },
+  {
+   "astId": 8,
+   "contract": "src/Playground.sol:Playground",
+   "label": "b",
+   "offset": 16,
+   "slot": "1",
+   "type": "t_uint64"
+  },
+  {
+   "astId": 10,
+   "contract": "src/Playground.sol:Playground",
+   "label": "c",
+   "offset": 24,
+   "slot": "1",
+   "type": "t_bool"
+  },
+  {
+   "astId": 18,
+   "contract": "src/Playground.sol:Playground",
+   "label": "totals",
+   "offset": 0,
+   "slot": "2",
+   "type": "t_struct(Totals)15_storage"
+  },
+  {
+   "astId": 22,
+   "contract": "src/Playground.sol:Playground",
+   "label": "balances",
+   "offset": 0,
+   "slot": "3",
+   "type": "t_mapping(t_address,t_uint256)"
+  },
+  {
+   "astId": 28,
+   "contract": "src/Playground.sol:Playground",
+   "label": "nested",
+   "offset": 0,
+   "slot": "4",
+   "type": "t_mapping(t_address,t_mapping(t_uint256,t_uint256))"
+  },
+  {
+   "astId": 31,
+   "contract": "src/Playground.sol:Playground",
+   "label": "items",
+   "offset": 0,
+   "slot": "5",
+   "type": "t_array(t_uint256)dyn_storage"
+  },
+  {
+   "astId": 33,
+   "contract": "src/Playground.sol:Playground",
+   "label": "lastPoker",
+   "offset": 0,
+   "slot": "6",
+   "type": "t_address"
+  }
+ ],
+ "types": {
+  "t_address": {
+   "encoding": "inplace",
+   "label": "address",
+   "numberOfBytes": "20"
+  },
+  "t_array(t_uint256)dyn_storage": {
+   "encoding": "dynamic_array",
+   "label": "uint256[]",
+   "numberOfBytes": "32",
+   "base": "t_uint256"
+  },
+  "t_bool": {
+   "encoding": "inplace",
+   "label": "bool",
+   "numberOfBytes": "1"
+  },
+  "t_mapping(t_address,t_mapping(t_uint256,t_uint256))": {
+   "encoding": "mapping",
+   "key": "t_address",
+   "label": "mapping(address => mapping(uint256 => uint256))",
+   "numberOfBytes": "32",
+   "value": "t_mapping(t_uint256,t_uint256)"
+  },
+  "t_mapping(t_address,t_uint256)": {
+   "encoding": "mapping",
+   "key": "t_address",
+   "label": "mapping(address => uint256)",
+   "numberOfBytes": "32",
+   "value": "t_uint256"
+  },
+  "t_mapping(t_uint256,t_uint256)": {
+   "encoding": "mapping",
+   "key": "t_uint256",
+   "label": "mapping(uint256 => uint256)",
+   "numberOfBytes": "32",
+   "value": "t_uint256"
+  },
+  "t_struct(Totals)15_storage": {
+   "encoding": "inplace",
+   "label": "struct Playground.Totals",
+   "numberOfBytes": "32",
+   "members": [
+    {
+     "astId": 12,
+     "contract": "src/Playground.sol:Playground",
+     "label": "lastTime",
+     "offset": 0,
+     "slot": "0",
+     "type": "t_uint64"
+    },
+    {
+     "astId": 14,
+     "contract": "src/Playground.sol:Playground",
+     "label": "index",
+     "offset": 8,
+     "slot": "0",
+     "type": "t_uint192"
+    }
+   ]
+  },
+  "t_uint128": {
+   "encoding": "inplace",
+   "label": "uint128",
+   "numberOfBytes": "16"
+  },
+  "t_uint192": {
+   "encoding": "inplace",
+   "label": "uint192",
+   "numberOfBytes": "24"
+  },
+  "t_uint256": {
+   "encoding": "inplace",
+   "label": "uint256",
+   "numberOfBytes": "32"
+  },
+  "t_uint64": {
+   "encoding": "inplace",
+   "label": "uint64",
+   "numberOfBytes": "8"
+  }
+ }
+}

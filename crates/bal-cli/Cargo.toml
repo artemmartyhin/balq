@@ -1,0 +1,26 @@
+[package]
+name = "balq"
+description = "BAL query: local archive of contract storage history, verified against block headers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "balq"
+path = "src/main.rs"
+
+[dependencies]
+bal-source = { version = "0.1.0", path = "../bal-source" }
+bal-archive = { version = "0.1.0", path = "../bal-archive" }
+bal-layout = { version = "0.1.0", path = "../bal-layout" }
+alloy-primitives.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "bal-node"
+description = "Node.js bindings for balq (napi-rs). Marshalling only — no logic lives here."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bal-archive = { version = "0.1.0", path = "../bal-archive" }
+bal-layout = { version = "0.1.0", path = "../bal-layout" }
+bal-source = { version = "0.1.0", path = "../bal-source" }
+alloy-primitives.workspace = true
+napi = { version = "3", default-features = false, features = ["napi9", "tokio_rt"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
+
+[lints]
+workspace = true

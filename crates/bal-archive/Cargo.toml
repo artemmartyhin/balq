@@ -1,0 +1,26 @@
+[package]
+name = "bal-archive"
+description = "Accumulates storage changes from BALs into an embedded KV and serves versioned reads. Knows nothing about Solidity."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bal-codec = { version = "0.1.0", path = "../bal-codec" }
+bal-source = { version = "0.1.0", path = "../bal-source" }
+alloy-primitives.workspace = true
+redb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+alloy-trie = { version = "0.9", features = ["ethereum"] }
+alloy-rlp.workspace = true
+
+[lints]
+workspace = true
