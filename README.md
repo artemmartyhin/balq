@@ -2,6 +2,8 @@
 
 [![ci](https://github.com/artemmartyhin/balq/actions/workflows/ci.yml/badge.svg)](https://github.com/artemmartyhin/balq/actions/workflows/ci.yml)
 [![node prebuilds](https://github.com/artemmartyhin/balq/actions/workflows/bal-node.yml/badge.svg)](https://github.com/artemmartyhin/balq/actions/workflows/bal-node.yml)
+[![crates.io](https://img.shields.io/crates/v/balq.svg?label=crates.io%20balq)](https://crates.io/crates/balq)
+[![npm](https://img.shields.io/npm/v/@balq/node.svg?label=npm%20%40balq%2Fnode)](https://www.npmjs.com/package/@balq/node)
 ![MSRV 1.90](https://img.shields.io/badge/MSRV-1.90-informational)
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
@@ -114,11 +116,22 @@ flowchart LR
 ## Install
 
 ```
-cargo install --path crates/bal-cli           # balq
-npm i balq                              # Node bindings (prebuilt for 5 platforms)
+cargo install balq          # CLI, from crates.io
+npm i @balq/node            # Node bindings, prebuilt for win32-x64 · linux-x64 · linux-arm64 · darwin-x64 · darwin-arm64
 ```
 
-Rust crates: `bal-codec`, `bal-source`, `bal-archive`, `bal-layout`.
+## Packages
+
+| Registry | Package | What |
+|---|---|---|
+| crates.io | [`balq`](https://crates.io/crates/balq) | the CLI |
+| crates.io | [`bal-archive`](https://crates.io/crates/bal-archive) | the archive: store, sync, reorgs, bootstrap — use this from Rust |
+| crates.io | [`bal-layout`](https://crates.io/crates/bal-layout) | solc `storageLayout` → slots and typed values |
+| crates.io | [`bal-source`](https://crates.io/crates/bal-source) | node access: traits, JSON-RPC, proof verification, primary+backup |
+| crates.io | [`bal-codec`](https://crates.io/crates/bal-codec) | EIP-7928 wire format only |
+| npm | [`@balq/node`](https://www.npmjs.com/package/@balq/node) | Node.js bindings — `Archive`, `Layout`, `view()`; the platform binaries are its `optionalDependencies` |
+
+Rust: `cargo add bal-archive bal-layout` — docs on [docs.rs](https://docs.rs/bal-archive).
 
 ## Use
 
@@ -141,7 +154,7 @@ storageLayout`, or a forge/hardhat artifact) — not the ABI.
 ### Node
 
 ```js
-const { Archive, Layout, NotAvailableError } = require("balq");
+const { Archive, Layout, NotAvailableError } = require("@balq/node");
 const ar = Archive.open("./balq.redb", { proofWindow: 0 });
 ar.watch(proxy, 114563);
 await ar.sync(rpcUrl, true, backupRpc);              // reads keep working meanwhile

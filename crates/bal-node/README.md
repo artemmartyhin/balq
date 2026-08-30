@@ -1,11 +1,11 @@
-# balq
+# @balq/node
 
 Node.js bindings for [balq](../../README.md): a local, verified archive of
 contract storage built from EIP-7928 Block-Level Access Lists. In-process
 (napi-rs), no HTTP hop; reads stay available while `sync()` runs.
 
 ```js
-const { Archive, Layout, NotAvailableError } = require("balq");
+const { Archive, Layout, NotAvailableError } = require("@balq/node");
 
 const ar = Archive.open("./balq.redb", { proofWindow: 0 });
 ar.watch("0x3582…53ce", 114563);            // from >= head + 1

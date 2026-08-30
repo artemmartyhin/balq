@@ -13,3 +13,6 @@ crates/bal-node/index.d.ts
 testbed/deploy.json
 testbed/state.json
 testbed/sync.log
+crates/bal-node/npm/
+crates/bal-node/artifacts/
+**/*.node
