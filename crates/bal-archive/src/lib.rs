@@ -250,6 +250,27 @@ pub struct HistoryEntry {
     pub provenance: Provenance,
 }
 
+/// What [`Archive::stats`] reports.
+#[derive(Debug, Clone)]
+pub struct ArchiveStats {
+    /// Last applied block and hash.
+    pub head: Option<(u64, B256)>,
+    /// Watched addresses with start blocks.
+    pub watches: Vec<(Address, u64)>,
+    /// Slot records in the primary index.
+    pub slot_records: u64,
+    /// Slots whose pre-value is proven.
+    pub slots_done: u64,
+    /// Slots whose pre-value is still awaited.
+    pub slots_pending: u64,
+    /// Slots whose pre-value was lost.
+    pub slots_lost: u64,
+    /// Block hashes kept for reorg detection.
+    pub retained_headers: u64,
+    /// Size of the archive file on disk.
+    pub file_bytes: u64,
+}
+
 /// Tunables fixed at [`Archive::open_with`].
 #[derive(Debug, Clone)]
 pub struct ArchiveConfig {
@@ -278,6 +299,7 @@ impl Default for ArchiveConfig {
 /// syncing writer.
 pub struct Archive {
     db: Database,
+    path: std::path::PathBuf,
     config: ArchiveConfig,
     /// Serialises `watch()`/`unwatch()` against the sync loop's per-block
     /// watchlist read.
@@ -299,7 +321,8 @@ impl Archive {
     /// Open or create `path`. Refuses files written with another
     /// [`SCHEMA_VERSION`].
     pub fn open_with(path: impl AsRef<Path>, config: ArchiveConfig) -> Result<Self> {
-        let db = Database::create(path)?;
+        let path_buf = path.as_ref().to_path_buf();
+        let db = Database::create(&path_buf)?;
         let txn = db.begin_write()?;
         {
             txn.open_table(SLOTS)?;
@@ -362,6 +385,7 @@ impl Archive {
         txn.commit()?;
         Ok(Self {
             db,
+            path: path_buf,
             config,
             watch_gate: Mutex::new(()),
             in_flight: AtomicU64::new(0),
@@ -499,6 +523,37 @@ impl Archive {
     }
 
     // ---- head -----------------------------------------------------------
+
+    /// Counts and sizes for `status`-style reporting. Scans the bootstrap
+    /// table, so it is proportional to the number of distinct slots seen —
+    /// fine for a command, not for a hot path.
+    pub fn stats(&self) -> Result<ArchiveStats> {
+        let rtx = self.db.begin_read()?;
+        let slot_records = rtx.open_table(SLOTS)?.len()?;
+        let pending = rtx.open_table(PENDING)?.len()?;
+        let boot = rtx.open_table(BOOT)?;
+        let (mut done, mut lost) = (0u64, 0u64);
+        for item in boot.iter()? {
+            let (_, v) = item?;
+            match decode_boot(v.value()) {
+                Some(BootState::Done) => done += 1,
+                Some(BootState::Lost { .. }) => lost += 1,
+                _ => {}
+            }
+        }
+        let retained_headers = rtx.open_table(HASHES)?.len()?;
+        let file_bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        Ok(ArchiveStats {
+            head: self.head()?,
+            watches: self.watchlist()?,
+            slot_records,
+            slots_done: done,
+            slots_pending: pending,
+            slots_lost: lost,
+            retained_headers,
+            file_bytes,
+        })
+    }
 
     /// Last applied block and its hash, if any block was applied.
     pub fn head(&self) -> Result<Option<(u64, B256)>> {

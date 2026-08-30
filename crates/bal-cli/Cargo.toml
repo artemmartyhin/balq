@@ -23,12 +23,19 @@ bal-archive = { version = "0.1.1", path = "../bal-archive" }
 bal-layout = { version = "0.1.1", path = "../bal-layout" }
 alloy-primitives.workspace = true
 clap.workspace = true
+clap_complete = "4"
+toml = "0.9"
 anyhow.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 async-trait.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
 tempfile.workspace = true
 
 [lints]

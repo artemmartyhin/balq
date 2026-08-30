@@ -66,3 +66,15 @@ Security release after an independent review (`docs/SECURITY-AUDIT.md`).
   are not followed; the BAL JSON is no longer cloned before decoding.
 - The npm publish job now generates `index.js` / `index.d.ts`; the `node`
   dev-dependency (a binary download on every `npm ci`) is gone.
+
+### Added (unreleased)
+- `--json` on every command (one document; `--follow` streams one per pass);
+  misses are `{ "error": { "code", "message" } }` with exit code 2.
+- `balq.toml` (`rpc`, `backup_rpc`, `proof_window`, `data`); flags win.
+- `balq completions <shell>`; `balq status` now reports slot records,
+  bootstrap proven/pending/lost, retained headers and file size
+  (`Archive::stats`).
+- Per-crate READMEs as docs.rs front pages with doctests; `examples/` for
+  Rust and Node; `docs/FAQ.md`; `Dockerfile`; `deploy/balq.service`;
+  dependabot; issue and PR templates.
+- CLI integration tests (`assert_cmd`).

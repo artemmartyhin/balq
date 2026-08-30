@@ -146,7 +146,14 @@ balq history <addr> --slot 0 --range A..B
 balq verify  --journal rows.jsonl                          # archive vs. rows you know are true
 balq typegen C.json --name CView > C.d.ts                  # TypeScript for the Node view
 balq bench   [--rpc <url>] [--out docs/bench]              # the numbers above
+balq completions bash > /etc/bash_completion.d/balq      # zsh, fish, powershell too
 ```
+
+Every command takes `--json` for scripts (a miss is `{"error":{"code":"BootstrapLost",…}}`
+with exit code 2, never a zero). Defaults for `--rpc`, `--backup-rpc`,
+`--proof-window` and `--data` can live in `balq.toml`. Run it as a service with
+`deploy/balq.service` or the `Dockerfile`; common errors are explained in
+[`docs/FAQ.md`](docs/FAQ.md).
 
 The layout is the `storageLayout` from your compiler (`forge inspect C
 storageLayout`, or a forge/hardhat artifact) — not the ABI.

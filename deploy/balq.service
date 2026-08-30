@@ -1,0 +1,31 @@
+# systemd unit for balq's follow loop. Install:
+#   sudo cp deploy/balq.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now balq
+# Adjust RPC, the data path and --proof-window (see `balq probe`).
+
+[Unit]
+Description=balq — verified contract storage archive (follow loop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=balq
+Group=balq
+WorkingDirectory=/var/lib/balq
+ExecStart=/usr/local/bin/balq --data /var/lib/balq/balq.redb sync \
+    --rpc http://127.0.0.1:8545 \
+    --follow --poll 4 --proof-window 128
+Restart=always
+RestartSec=5
+# The follow loop must keep up with the node's proof window; a long outage
+# turns first-seen slots into BootstrapLost. Restart fast, alert on downtime.
+StartLimitIntervalSec=0
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/balq
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
