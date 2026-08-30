@@ -6,6 +6,7 @@
 mod bench;
 mod commands;
 mod config;
+mod ui;
 mod util;
 
 use anyhow::Result;
@@ -33,6 +34,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Index contracts: watch, catch up, backfill to the deploy, follow.
+    /// The one command to run; `watch` / `sync` / `backfill` are its parts.
+    Index {
+        /// Contracts to index (or `watch` from balq.toml).
+        addresses: Vec<alloy_primitives::Address>,
+        /// JSON-RPC endpoint (or `rpc` from balq.toml).
+        #[arg(long)]
+        rpc: Option<String>,
+        /// Storage layout: changes are shown by variable name (or `layout` from balq.toml).
+        #[arg(long)]
+        layout: Option<PathBuf>,
+        /// Backfill only this many blocks back from the start (default: to the deploy).
+        #[arg(long)]
+        history: Option<u64>,
+        /// Skip backfill: history from the watch start only.
+        #[arg(long)]
+        no_backfill: bool,
+        /// Catch up and stop instead of following.
+        #[arg(long)]
+        once: bool,
+        /// Poll interval in seconds while following.
+        #[arg(long, default_value_t = 3)]
+        poll: u64,
+        /// Second endpoint, asked only for blocks --rpc no longer serves.
+        #[arg(long)]
+        backup_rpc: Option<String>,
+    },
     /// Day 0: does this node serve BALs, for old blocks too, and proofs?
     Probe {
         /// JSON-RPC endpoint (or `rpc` from balq.toml).
@@ -72,8 +100,8 @@ enum Cmd {
         /// Second endpoint, asked only for blocks --rpc no longer serves.
         #[arg(long)]
         backup_rpc: Option<String>,
-        /// Blocks per progress report.
-        #[arg(long, default_value_t = 1000)]
+        /// Blocks per progress update.
+        #[arg(long, default_value_t = 32)]
         chunk: u64,
     },
     /// Stop watching and delete the address's data.
@@ -234,6 +262,31 @@ async fn main() -> Result<()> {
     };
 
     match cli.cmd {
+        Cmd::Index {
+            addresses,
+            rpc,
+            layout,
+            history,
+            no_backfill,
+            once,
+            poll,
+            backup_rpc,
+        } => {
+            commands::index::run(
+                &ctx,
+                commands::index::Opts {
+                    addresses,
+                    rpc,
+                    layout,
+                    history,
+                    no_backfill,
+                    once,
+                    poll,
+                    backup_rpc,
+                },
+            )
+            .await
+        }
         Cmd::Probe { rpc, age } => commands::probe::run(&ctx, rpc, age).await,
         Cmd::Watch { address, from, rpc } => commands::watch::watch(&ctx, address, from, rpc).await,
         Cmd::Unwatch { address } => commands::watch::unwatch(&ctx, address),

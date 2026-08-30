@@ -17,9 +17,13 @@ use crate::{
 };
 use alloy_primitives::{Address, B256};
 use bal_source::{BalSource, SourceError, SourcedBlock};
+use futures::future::join_all;
 use redb::ReadableTable;
 use std::collections::BTreeSet;
 use tracing::{debug, info};
+
+/// Blocks requested concurrently per round. Verification stays sequential.
+pub const FETCH_AHEAD: u64 = 16;
 
 /// What to walk back to.
 #[derive(Debug, Clone, Default)]
@@ -158,58 +162,69 @@ impl Archive {
         }
         let mut expect = above.parent_hash;
 
+        // Blocks are fetched [`FETCH_AHEAD`] at a time (the network round
+        // trip dominates on a remote node) and verified strictly in order:
+        // each header must be the parent of the one above it.
         let mut cur = start - 1;
-        loop {
+        'walk: loop {
             if cur < target {
                 report.stopped = BackfillStop::Target;
                 break;
             }
-            if opts.max_blocks.is_some_and(|m| report.blocks_scanned >= m) {
+            let mut batch = FETCH_AHEAD.min(cur - target + 1);
+            if let Some(m) = opts.max_blocks {
+                batch = batch.min(m.saturating_sub(report.blocks_scanned));
+            }
+            if batch == 0 {
                 report.stopped = BackfillStop::Budget;
                 break;
             }
-            let blk = match source.block(cur).await {
-                Ok(b) => b,
-                Err(SourceError::BlockNotFound(_)) | Err(SourceError::NoBal(_)) => {
-                    report.stopped = BackfillStop::HistoryUnavailable(cur);
-                    break;
+            let numbers: Vec<u64> = (0..batch).map(|i| cur - i).collect();
+            let fetched = join_all(numbers.iter().map(|&b| source.block(b))).await;
+            for (b, res) in numbers.into_iter().zip(fetched) {
+                let blk = match res {
+                    Ok(blk) => blk,
+                    Err(SourceError::BlockNotFound(_)) | Err(SourceError::NoBal(_)) => {
+                        report.stopped = BackfillStop::HistoryUnavailable(b);
+                        break 'walk;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                if blk.header.number != b {
+                    return Err(wrong_block(b, blk.header.number));
                 }
-                Err(e) => return Err(e.into()),
-            };
-            if blk.header.number != cur {
-                return Err(wrong_block(cur, blk.header.number));
-            }
-            if blk.header.hash != expect {
-                return Err(ArchiveError::InconsistentSource(cur + 1));
-            }
-            let Some(bal_hash) = blk.header.block_access_list_hash else {
-                report.stopped = BackfillStop::PreBal(cur);
-                break;
-            };
-            blk.bal
-                .verify(bal_hash)
-                .map_err(|err| ArchiveError::Verification { block: cur, err })?;
+                if blk.header.hash != expect {
+                    return Err(ArchiveError::InconsistentSource(b + 1));
+                }
+                let Some(bal_hash) = blk.header.block_access_list_hash else {
+                    report.stopped = BackfillStop::PreBal(b);
+                    break 'walk;
+                };
+                blk.bal
+                    .verify(bal_hash)
+                    .map_err(|err| ArchiveError::Verification { block: b, err })?;
 
-            let (written, resolved, is_creation) =
-                self.backfill_block(addr, cur, &blk, &mut unresolved)?;
-            report.blocks_scanned += 1;
-            report.records_written += written;
-            report.slots_resolved += resolved;
-            report.to = cur;
-            debug!(%addr, block = cur, written, "backfilled");
-            expect = blk.header.parent_hash;
+                let (written, resolved, is_creation) =
+                    self.backfill_block(addr, b, &blk, &mut unresolved)?;
+                report.blocks_scanned += 1;
+                report.records_written += written;
+                report.slots_resolved += resolved;
+                report.to = b;
+                debug!(%addr, block = b, written, "backfilled");
+                expect = blk.header.parent_hash;
+                cur = b - 1;
 
-            if is_creation {
-                report.created_at = Some(cur);
-                unresolved.clear();
-                report.stopped = BackfillStop::Creation(cur);
-                break;
+                if is_creation {
+                    report.created_at = Some(b);
+                    unresolved.clear();
+                    report.stopped = BackfillStop::Creation(b);
+                    break 'walk;
+                }
+                if opts.resolve_only && unresolved.is_empty() {
+                    report.stopped = BackfillStop::Resolved;
+                    break 'walk;
+                }
             }
-            if opts.resolve_only && unresolved.is_empty() {
-                report.stopped = BackfillStop::Resolved;
-                break;
-            }
-            cur -= 1;
         }
         report.unresolved = unresolved.len();
         info!(?report, "backfill done");

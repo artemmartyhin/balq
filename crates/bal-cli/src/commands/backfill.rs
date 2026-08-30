@@ -1,8 +1,9 @@
 use super::Ctx;
+use crate::ui;
 use crate::util::emit;
 use alloy_primitives::Address;
 use anyhow::Result;
-use bal_archive::{BackfillOpts, BackfillReport, BackfillStop};
+use bal_archive::{BackfillOpts, BackfillStop};
 use bal_source::{Fallback, JsonRpcSource};
 use serde_json::json;
 
@@ -22,28 +23,10 @@ fn stop_json(s: BackfillStop) -> serde_json::Value {
         BackfillStop::Resolved => json!({ "kind": "resolved" }),
         BackfillStop::Budget => json!({ "kind": "budget" }),
         BackfillStop::PreBal(b) => json!({ "kind": "preBal", "block": b }),
-        BackfillStop::HistoryUnavailable(b) => json!({ "kind": "historyUnavailable", "block": b }),
-        BackfillStop::Nothing => json!({ "kind": "nothing" }),
-    }
-}
-
-fn stop_text(s: BackfillStop, addr: Address) -> String {
-    match s {
-        BackfillStop::Target => "reached the target block".into(),
-        BackfillStop::Creation(b) => {
-            format!("contract created at block {b} — history is complete, no value is unknown")
+        BackfillStop::HistoryUnavailable(b) => {
+            json!({ "kind": "historyUnavailable", "block": b })
         }
-        BackfillStop::Resolved => "every unknown pre-value has been found".into(),
-        BackfillStop::Budget => "budget exhausted".into(),
-        BackfillStop::PreBal(b) => format!(
-            "block {b} has no BAL hash (before the BAL fork); older state can only be proven against an archive node"
-        ),
-        BackfillStop::HistoryUnavailable(b) => format!(
-            "the node does not serve block {b} (history expiry?); pass --backup-rpc with an endpoint that still has it"
-        ),
-        BackfillStop::Nothing => format!(
-            "nothing to do for {addr} (already at the target, or its creation is already known)"
-        ),
+        BackfillStop::Nothing => json!({ "kind": "nothing" }),
     }
 }
 
@@ -53,18 +36,16 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     let ar = ctx.open()?;
     let src = Fallback::new(JsonRpcSource::new(&rpc), backup.map(JsonRpcSource::new));
 
-    let mut total = BackfillReport {
-        from: 0,
-        to: 0,
-        blocks_scanned: 0,
-        records_written: 0,
-        slots_resolved: 0,
-        unresolved: 0,
-        created_at: None,
-        stopped: BackfillStop::Nothing,
-    };
-    let mut first = true;
-    loop {
+    let start = ar
+        .watchlist()?
+        .into_iter()
+        .find(|(a, _)| *a == o.address)
+        .map(|(_, s)| s)
+        .unwrap_or(0);
+    let total = o.to.map(|t| start.saturating_sub(t));
+    let pb = (!ctx.json && !o.resolve).then(|| ui::backfill_bar(total));
+    let (mut scanned, mut records, mut resolved) = (0u64, 0usize, 0usize);
+    let last = loop {
         let rep = ar
             .backfill(
                 &src,
@@ -76,60 +57,74 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
                 },
             )
             .await?;
-        if first {
-            total.from = rep.from;
-            first = false;
-        }
-        total.to = rep.to;
-        total.blocks_scanned += rep.blocks_scanned;
-        total.records_written += rep.records_written;
-        total.slots_resolved += rep.slots_resolved;
-        total.unresolved = rep.unresolved;
-        total.created_at = rep.created_at;
-        total.stopped = rep.stopped;
-        if !ctx.json && rep.stopped == BackfillStop::Budget {
-            eprintln!(
-                "backfill {}: at block {}, {} block(s) read, {} record(s), {} pre-value(s) found",
-                o.address,
-                total.to,
-                total.blocks_scanned,
-                total.records_written,
-                total.slots_resolved
-            );
+        scanned += rep.blocks_scanned;
+        records += rep.records_written;
+        resolved += rep.slots_resolved;
+        if let Some(pb) = &pb {
+            pb.set_position(scanned);
+            pb.set_message(ui::num(rep.to));
         }
         if rep.stopped != BackfillStop::Budget {
-            break;
+            break rep;
         }
+    };
+    if let Some(pb) = &pb {
+        pb.finish_and_clear();
     }
 
     if ctx.json {
         emit(&json!({
             "address": o.address,
-            "from": total.from, "to": total.to,
-            "blocksScanned": total.blocks_scanned,
-            "recordsWritten": total.records_written,
-            "slotsResolved": total.slots_resolved,
-            "unresolved": total.unresolved,
-            "createdAt": total.created_at,
-            "stopped": stop_json(total.stopped),
+            "from": start, "to": last.to,
+            "blocksScanned": scanned,
+            "recordsWritten": records,
+            "slotsResolved": resolved,
+            "unresolved": last.unresolved,
+            "createdAt": last.created_at,
+            "stopped": stop_json(last.stopped),
         }));
         return Ok(());
     }
-    if total.to < total.from {
-        println!(
-            "history of {} now starts at block {} (was {})",
-            o.address, total.to, total.from
-        );
+    let who = ui::bold(ui::short_addr(o.address));
+    let tail = ui::dim(format!(
+        "({} blocks read, {} records, {} earlier values found)",
+        ui::num(scanned),
+        ui::num(records as u64),
+        resolved
+    ));
+    match last.stopped {
+        BackfillStop::Creation(c) => ui::ok(format!(
+            "{who}  created at {} — history complete, no value is unknown {tail}",
+            ui::num(c)
+        )),
+        BackfillStop::Target => ui::ok(format!(
+            "{who}  history now starts at {} {tail}",
+            ui::num(last.to)
+        )),
+        BackfillStop::Resolved => ui::ok(format!(
+            "{who}  every unknown earlier value found; history now starts at {} {tail}",
+            ui::num(last.to)
+        )),
+        BackfillStop::Nothing => ui::ok(format!(
+            "{who}  nothing to do (already at the target, or the deploy is known)"
+        )),
+        BackfillStop::PreBal(b) => ui::warn(format!(
+            "{who}  block {} has no BAL hash (before the fork) — older state needs an archive proof {tail}",
+            ui::num(b)
+        )),
+        BackfillStop::HistoryUnavailable(b) => ui::warn(format!(
+            "{who}  the node does not serve block {} (history expiry?) — pass --backup-rpc with an endpoint that has it {tail}",
+            ui::num(b)
+        )),
+        BackfillStop::Budget => ui::ok(format!("{who}  stopped at {} {tail}", ui::num(last.to))),
     }
-    println!(
-        "{} block(s) read, {} record(s) written, {} pre-value(s) found, {} still unknown",
-        total.blocks_scanned, total.records_written, total.slots_resolved, total.unresolved
-    );
-    println!("{}", stop_text(total.stopped, o.address));
-    if total.unresolved > 0 && total.stopped != BackfillStop::Budget {
+    if last.unresolved > 0 && !matches!(last.stopped, BackfillStop::Creation(_)) {
         println!(
-            "hint: `balq backfill {}` without --resolve walks back to the contract's creation",
-            o.address
+            "  {}",
+            ui::dim(format!(
+                "{} slot(s) still unknown before their first write — `balq backfill {}` without --resolve walks to the deploy",
+                last.unresolved, o.address
+            ))
         );
     }
     Ok(())

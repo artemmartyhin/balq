@@ -32,6 +32,8 @@ serde_json.workspace = true
 serde.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
+indicatif = "0.18"
+owo-colors = { version = "4", features = ["supports-colors"] }
 
 [dev-dependencies]
 assert_cmd = "2"

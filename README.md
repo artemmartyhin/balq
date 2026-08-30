@@ -12,10 +12,12 @@ archive node, no indexer schema.** Built on EIP-7928 Block-Level Access
 Lists (Glamsterdam).
 
 ```
-balq watch    0x3582… --rpc http://localhost:8545     # from now on
-balq sync     --rpc http://localhost:8545 --follow    # forward: every new block's BAL, verified
-balq backfill 0x3582… --rpc http://localhost:8545     # backward: older blocks' BALs, down to the deploy
-balq get      0x3582… --layout Playground.json --field "balances[0x61Cc…]" --block 114591
+balq index 0x3582… --rpc http://localhost:8545 --layout Playground.json
+  # watches it, walks older blocks back to the deploy, then follows — every block verified
+  ✓ 0x3582…53ce  created at 114562 — history complete (2456 blocks, 131 records)
+  117022  ▲ 6 record(s)   counter 19 → 20, totals.index …, items[4] 0 → …, [0xc0e2…8cd7] 60428 → 66428
+
+balq get 0x3582… --layout Playground.json --field "balances[0x61Cc…]" --block 114591
 → balances[0x61Cc…] = 37585   (slot 0xc0e2…, set @ 114590, bal)
 ```
 
@@ -142,10 +144,11 @@ Rust: `cargo add bal-archive bal-layout` — docs on [docs.rs](https://docs.rs/b
 ## Use
 
 ```
+balq index    <addr>... --rpc <url> [--layout C.json]       # the one command: watch + backfill to the deploy + follow
 balq probe    --rpc <url>                                  # does this node serve BALs, how far back?
-balq watch    <addr> [--from N | --rpc <url>]              # from block N, or from the node's head + 1
-balq sync     --rpc <url> --follow                         # forward, verified, resumes after any downtime
-balq backfill <addr> --rpc <url> [--to N | --resolve]      # backward: to the deploy, to block N, or just enough
+balq watch    <addr> [--from N | --rpc <url>]              # the parts of `index`, for scripts:
+balq sync     --rpc <url> --follow                         #   forward, verified, resumes after any downtime
+balq backfill <addr> --rpc <url> [--to N | --resolve]      #   backward: to the deploy, to block N, or just enough
 balq get      <addr> --slot 0 --block N                    # raw slot
 balq get      <addr> --layout C.json --field totals.index --block N
 balq diff    <addr> --from A --to B [--layout C.json]      # names where possible, [raw] where not
@@ -157,8 +160,9 @@ balq completions bash > /etc/bash_completion.d/balq      # zsh, fish, powershell
 ```
 
 Every command takes `--json` for scripts (a miss is `{"error":{"code":"BeforeStart",…}}`
-with exit code 2, never a zero). Defaults for `--rpc`, `--backup-rpc`
-and `--data` can live in `balq.toml`. Run it as a service with
+with exit code 2, never a zero). `balq.toml` holds the defaults: `rpc`,
+`backup_rpc`, `data`, and for `index` the `watch = ["0x…"]` list and the
+`layout` file — then it is just `balq index`. Run it as a service with
 `deploy/balq.service` or the `Dockerfile`; common errors are explained in
 [`docs/FAQ.md`](docs/FAQ.md).
 

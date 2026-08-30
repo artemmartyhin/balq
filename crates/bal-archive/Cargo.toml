@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+futures = "0.3"
 bal-codec = { version = "0.2.0", path = "../bal-codec" }
 bal-source = { version = "0.2.0", path = "../bal-source" }
 alloy-primitives.workspace = true

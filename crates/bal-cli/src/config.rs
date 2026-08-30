@@ -2,9 +2,11 @@
 //!
 //! ```toml
 //! rpc = "http://127.0.0.1:8545"
-//! backup_rpc = "https://archive.example"   # optional
-//! proof_window = 128                        # see `balq probe`
+//! backup_rpc = "https://old-blocks.example"   # optional: blocks the primary no longer serves
 //! data = "/var/lib/balq/balq.redb"
+//! watch = ["0x3582…53ce"]                     # what `balq index` indexes
+//! layout = "out/Playground.sol/Playground.json"
+//! proof_window = 128                          # only with `sync --prove`
 //! ```
 //!
 //! Flags always win over the file. Looked up at `--config`, else
@@ -26,6 +28,11 @@ pub struct Config {
     pub proof_window: Option<u64>,
     /// Archive file.
     pub data: Option<PathBuf>,
+    /// Addresses `balq index` indexes when none are given on the command line.
+    #[serde(default)]
+    pub watch: Vec<alloy_primitives::Address>,
+    /// Storage layout used to name fields in `index` / `sync --follow` output.
+    pub layout: Option<PathBuf>,
 }
 
 impl Config {

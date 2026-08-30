@@ -17,3 +17,5 @@ crates/bal-node/npm/
 crates/bal-node/artifacts/
 **/*.node
 crates/bal-node/rel/
+testbed/demo.redb
+testbed/demo-sync.*

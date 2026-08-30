@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The format follows
 [SemVer](https://semver.org/). Until 1.0, minor versions may break the API
 and the on-disk schema (`SCHEMA_VERSION`).
 
+## [0.2.1] — 2026-08-30
+
+### Added
+- `balq index <addr>… --rpc <url> [--layout C.json]`: the one command — watch,
+  catch up, backfill to the deploy, follow. Banner, node line, per-address
+  state, progress bar for the backward walk, one line per block with changed
+  fields by name (`counter 19 → 20`), empty blocks collapsed. Addresses and
+  layout can come from `balq.toml` (`watch = [...]`, `layout = "..."`).
+- Backfill fetches 16 blocks concurrently and verifies them in order:
+  about 4× faster on a remote node (`bal_archive::FETCH_AHEAD`).
+- `sync --follow` and `backfill` use the same renderer and progress bar.
+
 ## [0.2.0] — 2026-08-30
 
 ### Added

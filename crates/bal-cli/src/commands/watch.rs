@@ -81,7 +81,10 @@ pub fn status(ctx: &Ctx) -> Result<()> {
         println!("unknown:  none — every recorded slot has a known earlier value");
     }
     if s.slots_done > 0 {
-        println!("settled:  {} slot(s) with a known earlier value", s.slots_done);
+        println!(
+            "settled:  {} slot(s) with a known earlier value",
+            s.slots_done
+        );
     }
     println!(
         "headers:  {} retained for reorg detection",

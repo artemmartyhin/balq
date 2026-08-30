@@ -7,6 +7,7 @@ pub mod bench_cmd;
 pub mod diff;
 pub mod get;
 pub mod history;
+pub mod index;
 pub mod probe;
 pub mod sync;
 pub mod typegen;
