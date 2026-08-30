@@ -5,6 +5,38 @@ All notable changes to this project are documented here. The format follows
 [SemVer](https://semver.org/). Until 1.0, minor versions may break the API
 and the on-disk schema (`SCHEMA_VERSION`).
 
+## [0.3.0] — 2026-08-30
+
+### Added
+- **`balq index --serve`**: reads over HTTP (localhost) while the process holds
+  the file; `get` / `diff` / `history` / `status` from another terminal use it
+  automatically (sidecar `<archive>.serve`). The single-process file stops
+  being a wall.
+- **Header self-check**: every header's hash is recomputed from its fields
+  (`alloy-consensus`, EIP-7928 fields included) and must match; a node cannot
+  hand out a header whose fields disagree with the hash the chain links by.
+- **Storage layouts beyond one contract**: ERC-7201 / Diamond namespaces via a
+  layout manifest (`{ "base", "namespaces": [{ "prefix", "layout", "erc7201" | "slot" }] }`,
+  `Layout::mount`, `Layout::erc7201_slot`); dynamic `bytes`/`string` read
+  across their data slots (`get --field`, the Node `view`); mapping entries
+  named from candidate keys (`diff --keys`, `describeSlotWithKeys`) — `index`
+  uses the accounts of each block as candidates, so `balances[0x…]` shows up
+  by name.
+- `balq compact`: rewrite the file without free pages (`Archive::compact_file`).
+- HTTP compression (gzip/brotli) on the RPC client; 3–8× less traffic for BAL bodies.
+- Tests: retries, error precedence without a backup, `sync_step` budgets,
+  EIP-7702 designators are not creations, unwatch vs backfill, v2 → v3
+  migration, layouts flags, namespaces, strings, key candidates.
+
+### Changed
+- On-disk schema **v3**: values stored minimal (a counter is 1 byte, not 32),
+  block index grouped per (address, block). v1/v2 files are migrated on open;
+  older builds refuse v3 files cleanly.
+- `NotAvailable`: `BootstrapPending` / `BootstrapLost` → `UnknownBefore { first_seen }`,
+  `NotBootstrapped` → `NeverRecorded`. Same in `--json` codes and `NotAvailableError.code`.
+- A response over the size cap is `SourceError::TooLarge` and is never retried.
+- `Fallback` without a backup reports the primary's error.
+
 ## [0.2.3] — 2026-08-30
 
 ### Added

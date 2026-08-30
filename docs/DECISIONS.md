@@ -297,3 +297,31 @@ a full node keeps forever — the BAL is part of the block body.
 - **Schema.** New table `created` and meta key `anchor:<addr>`; key layouts
   unchanged, `SCHEMA_VERSION` stays 1 (a v0.1 file opens and gains the
   table on first write).
+
+## 0.3.0: schema v3, serve, header self-check, layouts (2026-08-30)
+
+- **Schema v3.** Values are stored as `tag ‖ minimal big-endian` (a counter is
+  1 byte, an address 20); the block index is one entry per (address, block)
+  holding the written slots, instead of one key per slot. Measured on the
+  synthetic worst case (random 32-byte values): ~450 B/record after compaction,
+  of which the B-tree itself is most — keys are 64 bytes and inserts land all
+  over the tree (`addr ‖ slot ‖ block` order is what makes reads one seek).
+  Going lower means a different key design (address ids, block-major pages),
+  not tuning. v1/v2 files migrate on open inside one transaction.
+- **`compact_file`.** redb never shrinks a file; after a long backfill the free
+  pages are real (4.8 → 2.8 MB on the test-bed archive).
+- **Single-process file → `index --serve`.** redb 2 has no read-only open on a
+  file another process writes, so the indexer answers reads over localhost
+  HTTP and advertises itself in `<archive>.serve`; read commands fall back
+  to it on the lock error. Same result types both ways (`Backend`).
+- **Header self-check.** `alloy-consensus` 2.4 knows the EIP-7928 header
+  fields; every header is re-hashed and must match. Closes the gap where the
+  chain was verified by hashes the node itself reported.
+- **Layouts.** ERC-7201 / Diamond: mount another layout as a struct at a
+  computed or explicit slot (manifest file). Dynamic `bytes`/`string`: the
+  slot word says short/long; long data lives at `keccak(slot)+i`, capped at
+  4096 words per read. Mapping keys: `keccak(key ‖ base)` per candidate; the
+  accounts of a block are the natural candidate set for a transfer's sender.
+- **Names.** `BootstrapPending`/`BootstrapLost` → `UnknownBefore`,
+  `NotBootstrapped` → `NeverRecorded`: the concept is "no record before N",
+  the proof machinery is an implementation detail behind `--prove`.

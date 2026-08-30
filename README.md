@@ -46,9 +46,9 @@ accumulates that fact, verifies it, and answers by variable name.
 1. **Completeness.** If a slot is not in the BAL, it did not change. Not
    "probably": a block with an incomplete BAL is invalid.
 2. **Verifiability.** Every stored value is checked — the BAL against the
-   header's hash, headers against each other by `parent_hash`, and the rare
-   proven value by Merkle proof against `state_root`. Every record carries
-   its provenance.
+   header's hash, every header's hash against its own fields, headers
+   against each other by `parent_hash`, and the rare proven value by Merkle
+   proof against `state_root`. Every record carries its provenance.
 3. **Definite boundaries.** A read returns a value or a typed reason it is
    unavailable. Never a silent zero.
 
@@ -144,15 +144,17 @@ Rust: `cargo add bal-archive bal-layout` — docs on [docs.rs](https://docs.rs/b
 ## Use
 
 ```
-balq index    <addr>... --rpc <url> [--layout C.json]       # the one command: watch + backfill to the deploy + follow
+balq index    <addr>... --rpc <url> [--layout C.json] [--serve]   # the one command: watch + backfill to the deploy + follow
                                                            #   several contracts: one walk, one file; --layout 0xADDR=C.json per address
+                                                           #   --serve: get/diff/history/status work from other terminals meanwhile
 balq probe    --rpc <url>                                  # does this node serve BALs, how far back?
 balq watch    <addr> [--from N | --rpc <url>]              # the parts of `index`, for scripts:
 balq sync     --rpc <url> --follow                         #   forward, verified, resumes after any downtime
 balq backfill <addr> --rpc <url> [--to N | --resolve]      #   backward: to the deploy, to block N, or just enough
 balq get      <addr> --slot 0 --block N                    # raw slot
 balq get      <addr> --layout C.json --field totals.index --block N
-balq diff    <addr> --from A --to B [--layout C.json]      # names where possible, [raw] where not
+balq diff     <addr> --from A --to B [--layout C.json] [--keys 0x…,0x…]   # names where possible; --keys names mapping entries
+balq compact                                               # rewrite the file without free pages
 balq history <addr> --slot 0 --range A..B
 balq verify  --journal rows.jsonl                          # archive vs. rows you know are true
 balq typegen C.json --name CView > C.d.ts                  # TypeScript for the Node view
@@ -209,9 +211,12 @@ deploy: creation seen means every value is known.
   `--backup-rpc` with any endpoint that still has them. It is asked for
   blocks only, and verified like the primary.
 - **Mappings** cannot be enumerated (keccak is one-way); reading a known key
-  works, "list all holders" does not.
-- **Not yet:** header self-hash check, `subscribe()` stream, ERC-7201 /
-  Diamond layouts, long `bytes`/`string`.
+  works, "list all holders" does not. Naming works from candidates: `index`
+  tries every account of the block, `diff --keys` whatever you pass.
+- **Layouts** come from solc; ERC-7201 / Diamond namespaces are mounted through
+  a manifest (see `bal-layout`), dynamic `bytes`/`string` are read across
+  their data slots.
+- **Not yet:** `subscribe()` stream, a query language over history.
 - **EIP-7928 is in Review.** The wire format lives in one crate and is pinned
   by a known-answer test against a real block; a spec change touches one file
   and fails that test first.

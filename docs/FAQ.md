@@ -2,10 +2,11 @@
 
 ### `Database already open. Cannot acquire lock.`
 
-Two processes opened the same `.redb` file — typically `balq sync --follow`
-in one terminal and `balq get` in another. The archive is single-process.
-Read from the same process (the Node binding does this: `sync()` runs while
-`storageAt()` answers), or stop the follower, or query a copy of the file.
+Two processes opened the same `.redb` file — typically `balq index` in one
+terminal and `balq get` in another. The file is single-process; run the
+indexer with `--serve` and every read command on that file goes through it
+automatically (localhost HTTP, sidecar `<archive>.serve`). The Node binding
+reads in-process while `sync()` runs.
 
 ### `watch from block N is in the past (head H)`
 
@@ -28,9 +29,8 @@ the shortcut: one `eth_getProof` at the head, if the node serves it.)
 The slot's earliest recorded write is at block N; what was there before is
 in some older block's BAL. `balq backfill <addr> --resolve` reads back just
 far enough to find it. Values from N on are complete and verified either
-way. `Lost` only means an optional `eth_getProof` shortcut (`sync --prove`)
-was tried and the node's state window had already passed — backfill does
-not care about that window.
+way. (`--prove` is an optional `eth_getProof` shortcut for the same value;
+backfill does not depend on the node's state window.)
 
 ### `balq probe` says `window 0`
 
@@ -87,11 +87,16 @@ slot), so you know which layout applies to which block range.
 
 `keccak` is one-way: a mapping slot cannot be turned back into its key
 without a candidate. Reading by a *known* key works (`balances[0x…]`);
-listing all keys does not. A candidate cache fed from senders/events is on
-the roadmap.
+listing all keys does not. With candidates it is named: `diff --keys
+0x…,0x…`, and `index` tries every account that appeared in the block (the
+sender of a transfer is in its BAL), so `balances[0x61Cc…]` usually shows up
+by name in the live output.
 
 ### How big will the file get?
 
-Measured 417–540 bytes per changed slot per block on this build
-(`docs/BENCH.md`). A contract with 100 changed slots per block is ~130 GB
-a year at that rate; reducing it is the top item on the storage roadmap.
+Schema v3 stores values minimal (a counter is 1 byte) and one block-index
+entry per (address, block). The synthetic bench — worst case, 32-byte random
+values, 20 slots per address per block — measures ~450 B per record after
+`balq compact`; real contracts (small numbers, few slots per block) land
+well below. `balq compact` after a long backfill returns free pages to the
+filesystem (4.8 → 2.8 MB on the test-bed archive).

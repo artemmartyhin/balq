@@ -18,9 +18,11 @@ Type=simple
 User=balq
 Group=balq
 WorkingDirectory=/var/lib/balq
-ExecStart=/usr/local/bin/balq --config /var/lib/balq/balq.toml index --poll 4
+ExecStart=/usr/local/bin/balq --config /var/lib/balq/balq.toml index --poll 4 --serve
 Restart=always
 RestartSec=5
+# --serve: `balq get/diff/history/status --data /var/lib/balq/balq.redb` work
+# while the service holds the file (localhost only).
 # Downtime costs nothing: on restart the loop continues from the archive
 # head and reads the blocks it missed from the node.
 StartLimitIntervalSec=0

@@ -44,3 +44,26 @@ ABI. `typescript(name)` emits a TypeScript interface for the same shape;
 `kind_of(path)` says whether a path is a value, struct, mapping or array.
 
 Part of [balq](https://github.com/artemmartyhin/balq).
+
+## Beyond one layout
+
+- **ERC-7201 / Diamond.** `Layout::mount(prefix, &other, base)` adds another
+  layout's variables as a struct at `base`; `Layout::erc7201_slot(id)` computes
+  the namespace slot. A manifest file does both declaratively:
+
+  ```json
+  { "base": "out/Vault.sol/Vault.json",
+    "namespaces": [
+      { "prefix": "erc20", "layout": "out/ERC20Storage.sol/ERC20Storage.json", "erc7201": "openzeppelin.storage.ERC20" },
+      { "prefix": "app",   "layout": "out/AppStorage.sol/AppStorage.json",     "slot": "0x…" } ] }
+  ```
+
+  `Layout::from_artifact` recognises it. The namespace layout is any solc
+  `storageLayout` whose top-level variables are the struct's members (a
+  one-line contract declaring the struct as its state variable does).
+- **Dynamic `bytes` / `string`.** `bytes_data_slots(loc, word)` lists the
+  extra slots a long value occupies; `decode_bytes(loc, word, chunks)`
+  assembles it (`Value::Str` / `Value::Bytes`).
+- **Mapping keys.** `describe_slot_with_keys(slot, probe, keys)` names
+  `balances[0x…]` when the key is among the candidates — `keccak` is one-way,
+  but one keccak per guess is cheap.

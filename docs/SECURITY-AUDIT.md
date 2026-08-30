@@ -118,3 +118,23 @@ confirmed and fixed.)
 Accepted / deferred: `unwatch` and `rollback_to` collect keys into a `Vec` before deleting (memory proportional to the address; correctness unaffected); `bootstrap_slot` can be called in unbounded parallel from JS (bounded only by the node); header self-hash remains the open trust gap noted above.
 
 Reviewed and found sound by the second reader: BAL hash binding and canonicalisation through the RLP encoder; proof slot matching and exclusion proofs; reorg detection and rollback including the below-`start-1` wipe; transport caps; key layout and prefix ranges; `decode` bounds; Node number/string validation; async panics in the binding surfacing as rejected promises.
+
+## Second pass — backfill, creation, prefetch, serve (2026-08-30)
+
+Scope: everything added after the first pass. Method: read as an attacker
+who controls the RPC endpoint (or sits between it and balq), then write the
+test that would have caught each finding.
+
+| # | Area | Finding | Status |
+|---|---|---|---|
+| 20 | backfill | The chain is walked by `parent_hash` from a block the archive holds; a walker that joins later is checked against the hash the archive stored for its start (header table, or the backfill anchor). If neither exists (the start header was pruned from the reorg window and the address was never backfilled), the node's header for that block is taken as canonical — the same trust root as the forward sync ("the node decides which chain"). | documented |
+| 21 | backfill | A block that does not link to the one above stops the walk with `InconsistentSource`; nothing of it is written (`backfill_refuses_a_broken_chain`). | tested |
+| 22 | creation | Only a **verified** BAL may mark an address created; under `allow_unverified` the flag is never set. An EIP-7702 designator (`0xef0100‖addr`) is a code change but not a creation, so an EOA's storage is never settled to zero (`delegation_designator_is_not_a_creation`). | tested |
+| 23 | creation | Settling every unrecorded slot to zero relies on EIP-7610 (creation fails over non-empty storage). Pre-Cancun chains where SELFDESTRUCT cleared storage satisfy it as well. | documented |
+| 24 | prefetch | Blocks fetched ahead of the apply loop are discarded when a reorg moves `next` (the queue front must equal `next`); a batch never crosses a fork. | reviewed |
+| 25 | prefetch | Up to 8 bodies in flight × 64 MiB cap = 512 MiB worst case per source. Acceptable for a local tool; lower `MAX_BODY_BYTES` for constrained hosts. | documented |
+| 26 | retries | Only transport failures are retried (4 attempts, backoff); RPC errors, malformed JSON and the size cap (`TooLarge`) are final, so a malicious endpoint cannot make balq download an oversized body four times (`rpc_errors_and_oversized_bodies_are_not_retried`). | tested |
+| 27 | header | `keccak(rlp(header))` is recomputed from the header fields and must equal the reported hash; a header with fields that do not match its hash is `Malformed` and nothing built on it is applied. | fixed |
+| 28 | migration | v1/v2 → v3 runs inside the open transaction: a crash leaves the old layout and version stamp intact; the legacy table is dropped only after the new one is written (`v2_file_is_migrated_on_open`). The grouped index is built in memory — proportional to the number of (address, block) pairs, once. | tested |
+| 29 | serve | Unauthenticated, plain HTTP, binds `127.0.0.1` by default. It exposes exactly the read API of the file; anyone who can reach the port can read the archive. Do not bind it to a public interface. The sidecar is a local file; a stale one (killed process) is detected by a refused connection and removed. | documented |
+| 30 | unwatch | `unwatch` during a backfill walk: the per-block transaction re-checks the watch and writes nothing; a walk for an unwatched address is refused up front (`unwatched_address_cannot_be_backfilled`). | tested |

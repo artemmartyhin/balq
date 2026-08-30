@@ -34,7 +34,8 @@ view.nested[user][7n]   // nested mappings
 ```
 
 Integers are `bigint` (a `number` would silently lose precision), bools
-`boolean`, addresses/bytes/undecodable words `string`. `private` variables
+`boolean`, addresses/bytes/undecodable words `string`; a `string` variable
+is its text, however long (the data slots are read for you). `private` variables
 read the same as `public` ones — this is storage, not getters.
 
 A missing value **throws**, never returns `undefined`:
@@ -104,6 +105,8 @@ node's state window allows — an optional shortcut, nothing more.
 | `changedSlots(addr, block)` | from the block index |
 | `bootstrapSlot(rpcUrl, addr, slot, backupRpc?)` | optional: prove a never-changed slot at the head instead of backfilling |
 | `layout.locate(path)` / `decode(loc, word)` / `describeSlot(slot)` / `kindOf(path)` | what `view` is built on |
+| `layout.describeSlotWithKeys(slot, ["0x…"])` | name mapping entries from candidate keys |
+| `layout.bytesDataSlots(loc, word)` / `decodeBytes(loc, word, chunks)` | dynamic `bytes`/`string` (the `view` does this for you) |
 
 `provenance` is `"bal"` (verified against the header's BAL hash),
 `"proof"` (Merkle proof against `state_root`), or, only if you opted in,
@@ -118,6 +121,9 @@ node's state window allows — an optional shortcut, nothing more.
 - **Mappings** cannot be enumerated (keccak is one-way): `balances[user]`
   works, "list all holders" does not.
 - **Proxies.** Watch the proxy; the layout is the implementation's.
+- **ERC-7201 / Diamond.** Pass a layout *manifest* to `Layout.fromFile` —
+  `{ "base": "…", "namespaces": [{ "prefix": "erc20", "layout": "…", "erc7201": "openzeppelin.storage.ERC20" }] }`
+  — and read `view.erc20.balances[user]`.
 
 Docs, design notes, benchmarks and the security audit:
 [github.com/artemmartyhin/balq](https://github.com/artemmartyhin/balq).
