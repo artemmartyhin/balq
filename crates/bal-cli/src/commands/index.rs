@@ -27,6 +27,17 @@ pub struct Opts {
 
 /// Blocks per backfill step between progress updates.
 const STEP: u64 = 32;
+/// Consecutive source failures tolerated by `--once` before giving up;
+/// while following there is no limit — the node will be back.
+const MAX_FAILURES: u32 = 10;
+
+fn retry_note(ctx: &Ctx, e: &impl std::fmt::Display, poll: u64) {
+    if ctx.json {
+        emit(&json!({ "error": e.to_string(), "retryInSeconds": poll }));
+    } else {
+        ui::warn(format!("{e} — retrying in {poll}s"));
+    }
+}
 
 async fn node_info(src: &JsonRpcSource) -> (Option<String>, Option<u64>) {
     let client = src
@@ -140,20 +151,53 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
         println!();
     }
 
-    // Forward first: backfill needs the archive at (or above) each start.
-    let sp = (!ctx.json).then(|| ui::spinner(format!("syncing to head {}", ui::num(head))));
-    let rep = ar.sync(&src, None).await?;
-    if let Some(sp) = sp {
-        sp.finish_and_clear();
+    // Forward first, in steps with progress: backfill needs the archive at
+    // (or above) each start.
+    let first = ar.head()?.map(|(h, _)| h + 1).unwrap_or(new_start);
+    let total = if head >= first { head - first + 1 } else { 0 };
+    let pb = (!ctx.json && total > 0).then(|| ui::walk_bar("sync", Some(total)));
+    let mut applied = 0u64;
+    let mut failures = 0u32;
+    loop {
+        let rep = match ar.sync_step(&src, None, Some(STEP)).await {
+            Ok(r) => r,
+            Err(e) => {
+                failures += 1;
+                if o.once && failures > MAX_FAILURES {
+                    return Err(e.into());
+                }
+                match &pb {
+                    Some(pb) => pb.suspend(|| retry_note(ctx, &e, o.poll)),
+                    None => retry_note(ctx, &e, o.poll),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(o.poll)).await;
+                continue;
+            }
+        };
+        failures = 0;
+        applied += rep.blocks_applied;
+        match &pb {
+            Some(pb) => {
+                pb.set_position(applied.min(total));
+                pb.set_message(ui::num(rep.to.unwrap_or(first)));
+                pb.suspend(|| render_pass(ctx, &ar, &rep, layout.as_ref(), &addrs))?;
+            }
+            None => render_pass(ctx, &ar, &rep, layout.as_ref(), &addrs)?,
+        }
+        if rep.blocks_applied == 0 || (rep.to.is_some() && rep.to >= rep.source_head) {
+            break;
+        }
     }
-    render_pass(ctx, &ar, &rep, layout.as_ref(), &addrs)?;
+    if let Some(pb) = &pb {
+        pb.finish_and_clear();
+    }
 
     // Backward: to the deploy, or `--history` blocks. An address whose
     // start block the node has not produced yet is retried while following.
     let mut pending: Vec<Address> = Vec::new();
     if !o.no_backfill {
         for a in &addrs {
-            if !backfill_one(ctx, &ar, &src, *a, o.history).await? {
+            if !backfill_one(ctx, &ar, &src, *a, o.history, o.poll, o.once).await? {
                 pending.push(*a);
             }
         }
@@ -185,7 +229,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
                 if !pending.is_empty() && rep.blocks_applied > 0 {
                     let mut still = Vec::new();
                     for a in pending.drain(..) {
-                        if !backfill_one(ctx, &ar, &src, a, o.history).await? {
+                        if !backfill_one(ctx, &ar, &src, a, o.history, o.poll, o.once).await? {
                             still.push(a);
                         }
                     }
@@ -209,6 +253,8 @@ async fn backfill_one<S: BalSource + ?Sized>(
     src: &S,
     a: Address,
     history: Option<u64>,
+    poll: u64,
+    once: bool,
 ) -> Result<bool> {
     if ar.created_at(a)?.is_some() {
         return Ok(true);
@@ -229,10 +275,11 @@ async fn backfill_one<S: BalSource + ?Sized>(
     }
     let to = history.map(|h| start.saturating_sub(h).max(1));
     let total = to.map(|t| start.saturating_sub(t));
-    let pb = (!ctx.json).then(|| ui::backfill_bar(total));
+    let pb = (!ctx.json).then(|| ui::walk_bar("backfill", total));
     let (mut scanned, mut records, mut resolved) = (0u64, 0usize, 0usize);
+    let mut failures = 0u32;
     let stopped = loop {
-        let rep = ar
+        let rep = match ar
             .backfill(
                 src,
                 a,
@@ -242,7 +289,23 @@ async fn backfill_one<S: BalSource + ?Sized>(
                     resolve_only: false,
                 },
             )
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                failures += 1;
+                if once && failures > MAX_FAILURES {
+                    return Err(e.into());
+                }
+                match &pb {
+                    Some(pb) => pb.suspend(|| retry_note(ctx, &e, poll)),
+                    None => retry_note(ctx, &e, poll),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(poll)).await;
+                continue;
+            }
+        };
+        failures = 0;
         scanned += rep.blocks_scanned;
         records += rep.records_written;
         resolved += rep.slots_resolved;

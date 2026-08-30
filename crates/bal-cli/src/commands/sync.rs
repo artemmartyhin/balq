@@ -23,6 +23,7 @@ pub fn report_json(r: &SyncReport) -> serde_json::Value {
         "reorgedTo": r.reorged_to, "slotsWritten": r.slots_written,
         "bootstrapped": r.bootstrapped, "bootstrapPending": r.bootstrap_pending,
         "bootstrapLost": r.bootstrap_lost, "unverifiedBlocks": r.unverified_blocks,
+        "sourceHead": r.source_head,
     })
 }
 

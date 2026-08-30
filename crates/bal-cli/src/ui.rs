@@ -82,9 +82,9 @@ pub fn fail(msg: impl Display) {
     println!("  {} {}", red("✗"), msg);
 }
 
-/// Progress for a backward walk: a bar when the number of blocks is known,
-/// a counter when it is not (walking to the deploy).
-pub fn backfill_bar(total: Option<u64>) -> ProgressBar {
+/// Progress over blocks: a bar when their number is known, a counter when it
+/// is not (walking back to the deploy).
+pub fn walk_bar(prefix: &str, total: Option<u64>) -> ProgressBar {
     let (pb, template) = match total {
         Some(t) => (
             ProgressBar::new(t),
@@ -99,18 +99,7 @@ pub fn backfill_bar(total: Option<u64>) -> ProgressBar {
         .unwrap_or_else(|_| ProgressStyle::default_bar())
         .progress_chars("█▓░");
     pb.set_style(style);
-    pb.set_prefix("backfill");
-    pb.enable_steady_tick(Duration::from_millis(120));
-    pb
-}
-
-pub fn spinner(msg: impl Into<String>) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::with_template("  {spinner:.cyan} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-    );
-    pb.set_message(msg.into());
+    pb.set_prefix(prefix.to_string());
     pb.enable_steady_tick(Duration::from_millis(120));
     pb
 }

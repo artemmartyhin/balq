@@ -54,7 +54,10 @@ impl<P: BalSource, B: BalSource> BalSource for Fallback<P, B> {
             Ok(b) => b,
             Err(e) => {
                 info!(block = number, %e, "primary has no BAL body; asking backup");
-                self.backup.bal(number).await?
+                self.backup
+                    .bal(number)
+                    .await
+                    .map_err(|b| prefer_primary(e, b))?
             }
         };
         Ok(SourcedBlock { header, bal })
@@ -65,7 +68,10 @@ impl<P: BalSource, B: BalSource> BalSource for Fallback<P, B> {
             Ok(b) => Ok(b),
             Err(e) => {
                 info!(block = number, %e, "primary has no BAL body; asking backup");
-                self.backup.bal(number).await
+                self.backup
+                    .bal(number)
+                    .await
+                    .map_err(|b| prefer_primary(e, b))
             }
         }
     }
@@ -78,7 +84,10 @@ impl<P: StateSource, B: StateSource> StateSource for Fallback<P, B> {
             Ok(p) => Ok(p),
             Err(e) => {
                 debug!(block, %addr, slots = slots.len(), %e, "primary cannot prove; asking backup");
-                self.backup.proof(addr, slots, block).await
+                self.backup
+                    .proof(addr, slots, block)
+                    .await
+                    .map_err(|b| prefer_primary(e, b))
             }
         }
     }
@@ -157,8 +166,19 @@ impl<S: StateSource + ?Sized> StateSource for &S {
     }
 }
 
+/// The error to report when both failed: the primary's, if there is no
+/// backup at all (its absence is not the news), else both.
+fn prefer_primary(primary: crate::SourceError, backup: crate::SourceError) -> crate::SourceError {
+    match &backup {
+        crate::SourceError::Transport(m) if m == ABSENT => primary,
+        _ => crate::SourceError::Transport(format!("primary: {primary}; backup: {backup}")),
+    }
+}
+
+const ABSENT: &str = "no backup source configured";
+
 fn absent() -> crate::SourceError {
-    crate::SourceError::Transport("no backup source configured".into())
+    crate::SourceError::Transport(ABSENT.into())
 }
 
 #[cfg(test)]

@@ -5,6 +5,17 @@ All notable changes to this project are documented here. The format follows
 [SemVer](https://semver.org/). Until 1.0, minor versions may break the API
 and the on-disk schema (`SCHEMA_VERSION`).
 
+## [0.2.2] — 2026-08-30
+
+### Added
+- `Archive::sync_step(source, state, max_blocks)` and `SyncReport::source_head`:
+  the forward sync in steps, so `balq index` shows `sync ████ 40/137 blocks · at 117060`
+  while catching up instead of a spinner.
+- The forward sync fetches blocks 8 at a time like backfill (a reorg discards
+  what was prefetched past the fork).
+- `JsonRpcSource` retries a call up to 4 times with backoff on transport
+  failures (5xx from a gateway, a body cut mid-way); RPC errors are never retried.
+
 ## [0.2.1] — 2026-08-30
 
 ### Added
@@ -13,7 +24,7 @@ and the on-disk schema (`SCHEMA_VERSION`).
   state, progress bar for the backward walk, one line per block with changed
   fields by name (`counter 19 → 20`), empty blocks collapsed. Addresses and
   layout can come from `balq.toml` (`watch = [...]`, `layout = "..."`).
-- Backfill fetches 16 blocks concurrently and verifies them in order:
+- Backfill fetches 8 blocks concurrently and verifies them in order:
   about 4× faster on a remote node (`bal_archive::FETCH_AHEAD`).
 - `sync --follow` and `backfill` use the same renderer and progress bar.
 

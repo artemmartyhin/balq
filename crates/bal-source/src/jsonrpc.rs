@@ -21,6 +21,10 @@ use serde_json::{json, Value};
 pub const BAL_HASH_FIELD: &str = "blockAccessListHash";
 /// JSON-RPC method serving the BAL body (execution-apis).
 pub const BAL_METHOD: &str = "eth_getBlockAccessList";
+/// Attempts per call on transport failure (gateways behind a CDN answer 5xx
+/// under load and drop bodies); RPC errors are never retried.
+const RETRIES: u32 = 4;
+
 /// Largest JSON-RPC response body accepted, in bytes.
 pub const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -75,8 +79,26 @@ impl JsonRpcSource {
         })
     }
 
-    /// Raw JSON-RPC call; returns the `result` member or the error object as [`SourceError::Rpc`].
+    /// Raw JSON-RPC call; returns the `result` member or the error object as
+    /// [`SourceError::Rpc`]. Transport failures (5xx from a gateway, a
+    /// connection dropped mid-body) are retried a few times with backoff;
+    /// RPC errors and malformed JSON are not.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        let mut delay = std::time::Duration::from_millis(400);
+        for attempt in 0..RETRIES {
+            match self.call_once(method, params.clone()).await {
+                Err(SourceError::Transport(e)) if attempt + 1 < RETRIES => {
+                    tracing::debug!(method, attempt, %e, "transport error; retrying");
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+                other => return other,
+            }
+        }
+        unreachable!("the loop returns on its last attempt")
+    }
+
+    async fn call_once(&self, method: &str, params: Value) -> Result<Value> {
         let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
         let http = self
             .client

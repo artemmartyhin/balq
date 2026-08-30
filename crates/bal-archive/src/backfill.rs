@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use tracing::{debug, info};
 
 /// Blocks requested concurrently per round. Verification stays sequential.
-pub const FETCH_AHEAD: u64 = 16;
+pub const FETCH_AHEAD: u64 = 8;
 
 /// What to walk back to.
 #[derive(Debug, Clone, Default)]

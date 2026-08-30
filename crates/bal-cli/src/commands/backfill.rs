@@ -43,7 +43,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
         .map(|(_, s)| s)
         .unwrap_or(0);
     let total = o.to.map(|t| start.saturating_sub(t));
-    let pb = (!ctx.json && !o.resolve).then(|| ui::backfill_bar(total));
+    let pb = (!ctx.json && !o.resolve).then(|| ui::walk_bar("backfill", total));
     let (mut scanned, mut records, mut resolved) = (0u64, 0usize, 0usize);
     let last = loop {
         let rep = ar

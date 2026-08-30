@@ -45,7 +45,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     match back.stopped {
         BackfillStop::Creation(c) => {
-            println!("backfill: created at {c} — history complete ({} blocks)", back.blocks_scanned)
+            println!(
+                "backfill: created at {c} — history complete ({} blocks)",
+                back.blocks_scanned
+            )
         }
         other => println!("backfill: history from {} ({other:?})", back.to),
     }

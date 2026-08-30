@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+tokio.workspace = true
 bal-codec = { version = "0.2.0", path = "../bal-codec", features = ["json"] }
 alloy-primitives = { workspace = true, features = ["serde"] }
 async-trait.workspace = true

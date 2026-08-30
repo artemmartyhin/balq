@@ -1,10 +1,14 @@
 //! The sync loop: fetch → verify → detect reorg → apply → early bootstrap.
 //! Memory: one block's BAL at a time.
 
+use crate::backfill::FETCH_AHEAD;
 use crate::{Archive, ArchiveError, Result};
 use alloy_primitives::{Address, B256};
-use bal_source::{check_requested, verify_account_proof, BalSource, SourceError, StateSource};
-use std::collections::BTreeMap;
+use bal_source::{
+    check_requested, verify_account_proof, BalSource, SourceError, SourcedBlock, StateSource,
+};
+use futures::future::join_all;
+use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, info, warn};
 
 /// Block hashes retained behind the head when the source has no
@@ -39,6 +43,9 @@ pub struct SyncReport {
     pub bootstrap_lost: usize,
     /// Blocks applied without a BAL hash (only with `allow_unverified`).
     pub unverified_blocks: u64,
+    /// The source's head when the pass started; `to == source_head` means
+    /// the archive caught up.
+    pub source_head: Option<u64>,
 }
 
 /// Releases the sync slot when the pass ends — by return, error, or the
@@ -64,17 +71,30 @@ impl Archive {
         source: &S,
         state: Option<&dyn StateSource>,
     ) -> Result<SyncReport> {
+        self.sync_step(source, state, None).await
+    }
+
+    /// [`Archive::sync`] that applies at most `max_blocks` and returns, so a
+    /// caller can show progress and keep reading between steps. The pass is
+    /// complete when `blocks_applied` is 0 or `to == source_head`.
+    pub async fn sync_step<S: BalSource + ?Sized>(
+        &self,
+        source: &S,
+        state: Option<&dyn StateSource>,
+        max_blocks: Option<u64>,
+    ) -> Result<SyncReport> {
         if !self.begin_sync() {
             return Err(ArchiveError::SyncInProgress);
         }
         let _guard = SyncGuard(self);
-        self.sync_inner(source, state).await
+        self.sync_inner(source, state, max_blocks).await
     }
 
     async fn sync_inner<S: BalSource + ?Sized>(
         &self,
         source: &S,
         state: Option<&dyn StateSource>,
+        max_blocks: Option<u64>,
     ) -> Result<SyncReport> {
         let mut report = SyncReport::default();
         // Claim the start block before the first await so that no `watch()`
@@ -83,6 +103,7 @@ impl Archive {
             return Ok(report);
         };
         let src_head = source.head().await?;
+        report.source_head = Some(src_head);
         // Reorg horizon: the node's `finalized` tag, clamped to its head
         // (a node cannot prune our head by claiming a finalized block above
         // it) and never further back than the fallback horizon (so the
@@ -120,8 +141,27 @@ impl Archive {
         // same parent link (pooled upstreams on different forks).
         let mut last_fork: Option<u64> = None;
 
+        // Blocks are fetched FETCH_AHEAD at a time and applied in order; a
+        // reorg discards what was prefetched past the fork.
+        let mut queue: VecDeque<(u64, bal_source::Result<SourcedBlock>)> = VecDeque::new();
         while next <= src_head {
-            let blk = match source.block(next).await {
+            if max_blocks.is_some_and(|m| report.blocks_applied >= m) {
+                break;
+            }
+            if queue.front().map(|(n, _)| *n) != Some(next) {
+                queue.clear();
+                let mut n = FETCH_AHEAD.min(src_head - next + 1);
+                if let Some(m) = max_blocks {
+                    n = n.min(m.saturating_sub(report.blocks_applied)).max(1);
+                }
+                let numbers: Vec<u64> = (0..n).map(|i| next + i).collect();
+                let fetched = join_all(numbers.iter().map(|&b| source.block(b))).await;
+                queue.extend(numbers.into_iter().zip(fetched));
+            }
+            let Some((_, res)) = queue.pop_front() else {
+                break;
+            };
+            let blk = match res {
                 Ok(b) => b,
                 Err(SourceError::BlockNotFound(n)) if n >= src_head.saturating_sub(2) => {
                     debug!(block = n, "not yet available upstream; stopping this pass");
