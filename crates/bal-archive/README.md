@@ -16,11 +16,15 @@ let archive = Archive::open("./balq.redb")?;
 let proxy = address!("35825972e2ca90851b14576C531F13dA0B5d53ce");
 archive.watch(proxy, 114_563)?;               // must be above the current head
 
-// One pass: fetch → verify keccak(rlp(bal)) against the header → apply.
-// Pass the same source as `state` to prove pre-values via eth_getProof.
+// Forward: fetch → verify keccak(rlp(bal)) against the header → apply.
 let node = JsonRpcSource::new("http://localhost:8545");
-let report = archive.sync(&node, Some(&node)).await?;
+let report = archive.sync(&node, None).await?;
 println!("applied {} blocks", report.blocks_applied);
+
+// Backward: older blocks' BALs down to the contract's creation, each block
+// chained by parent_hash to the one above. No proofs, no archive node.
+let back = archive.backfill(&node, proxy, bal_archive::BackfillOpts::default()).await?;
+println!("history now starts at {} ({:?})", back.to, back.stopped);
 
 let slot = B256::from(U256::from(0).to_be_bytes::<32>());
 match archive.storage_at(proxy, slot, 114_591) {
@@ -36,6 +40,10 @@ Every stored word carries its `Provenance` (`Bal`, `Proof`, or opt-in
 methods take `&self`: share the archive in an `Arc` and read while `sync`
 runs.
 
-Key layout, bootstrap rules, reorg handling and the trust model are
+`sync(&node, Some(&state))` additionally proves the earlier value of newly
+seen slots with `eth_getProof` while the node's state window allows — an
+optional shortcut for what `backfill` reads from blocks.
+
+Key layout, backfill and creation rules, reorg handling and the trust model are
 documented in the [repository](https://github.com/artemmartyhin/balq)
 (`docs/DECISIONS.md`, `docs/SECURITY-AUDIT.md`).

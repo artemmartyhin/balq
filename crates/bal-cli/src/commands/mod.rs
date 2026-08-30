@@ -2,6 +2,7 @@
 //! mode, config) and returns `anyhow::Result`; exit codes for "not
 //! available" (2) and "mismatch" (1) are set by the command itself.
 
+pub mod backfill;
 pub mod bench_cmd;
 pub mod diff;
 pub mod get;

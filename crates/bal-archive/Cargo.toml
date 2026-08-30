@@ -13,8 +13,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-bal-codec = { version = "0.1.1", path = "../bal-codec" }
-bal-source = { version = "0.1.1", path = "../bal-source" }
+bal-codec = { version = "0.2.0", path = "../bal-codec" }
+bal-source = { version = "0.2.0", path = "../bal-source" }
 alloy-primitives.workspace = true
 redb.workspace = true
 thiserror.workspace = true

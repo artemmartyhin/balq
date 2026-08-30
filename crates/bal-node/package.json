@@ -1,6 +1,6 @@
 {
   "name": "@balq/node",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Local, verified archive of contract storage built from EIP-7928 BALs — Node.js bindings",
   "main": "lib.js",
   "types": "lib.d.ts",
@@ -34,10 +34,10 @@
     "@napi-rs/cli": "^3"
   },
   "optionalDependencies": {
-    "@balq/node-win32-x64-msvc": "0.1.1",
-    "@balq/node-linux-x64-gnu": "0.1.1",
-    "@balq/node-linux-arm64-gnu": "0.1.1",
-    "@balq/node-darwin-x64": "0.1.1",
-    "@balq/node-darwin-arm64": "0.1.1"
+    "@balq/node-win32-x64-msvc": "0.2.0",
+    "@balq/node-linux-x64-gnu": "0.2.0",
+    "@balq/node-linux-arm64-gnu": "0.2.0",
+    "@balq/node-darwin-x64": "0.2.0",
+    "@balq/node-darwin-arm64": "0.2.0"
   }
 }

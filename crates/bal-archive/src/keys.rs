@@ -57,7 +57,7 @@ impl Provenance {
     }
 }
 
-pub fn slot_key(
+pub(crate) fn slot_key(
     addr: Address,
     slot: B256,
     block: u64,

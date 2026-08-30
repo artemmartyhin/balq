@@ -212,3 +212,31 @@ fn history_with_inverted_range_is_a_coded_error() {
         .clone();
     assert_eq!(json(&out)["error"]["code"], "InvalidRange");
 }
+
+#[test]
+fn backfill_refuses_unwatched_address_before_touching_the_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("a.redb");
+    // No RPC is reachable at port 1; the refusal must come from the archive.
+    balq()
+        .args(["--data"])
+        .arg(&data)
+        .args(["backfill", PROXY, "--rpc", "http://127.0.0.1:1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not watched"));
+    // Watched but never synced: also refused up front.
+    balq()
+        .args(["--data"])
+        .arg(&data)
+        .args(["watch", PROXY, "--from", "100"])
+        .assert()
+        .success();
+    balq()
+        .args(["--data"])
+        .arg(&data)
+        .args(["backfill", PROXY, "--rpc", "http://127.0.0.1:1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("below watch start"));
+}

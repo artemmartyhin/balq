@@ -92,9 +92,23 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
             if ctx.json {
                 emit(&na_json(&e));
             } else {
-                println!("NOT AVAILABLE: {e}");
-                if matches!(e, NotAvailable::NotBootstrapped) {
-                    println!("hint: pass --rpc <url> (or --prove with balq.toml) to prove the slot's value now");
+                println!("NOT AVAILABLE ({}): {e}", crate::util::na_code(&e));
+                match e {
+                    NotAvailable::NotBootstrapped => println!(
+                        "hint: `balq backfill {}` reads older blocks back to the contract's creation; or --prove to prove it at the head",
+                        o.address
+                    ),
+                    NotAvailable::BootstrapPending { .. } | NotAvailable::BootstrapLost { .. } => {
+                        println!(
+                            "hint: `balq backfill {} --resolve` finds it in older blocks",
+                            o.address
+                        )
+                    }
+                    NotAvailable::BeforeStart { .. } => println!(
+                        "hint: `balq backfill {} --to {}` extends history back to that block",
+                        o.address, o.block
+                    ),
+                    _ => {}
                 }
             }
             std::process::exit(2);

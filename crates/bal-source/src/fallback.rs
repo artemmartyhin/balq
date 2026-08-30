@@ -14,7 +14,7 @@ use crate::{AccountProof, BalSource, Header, Result, SourcedBlock, StateSource};
 use alloy_primitives::{Address, B256};
 use async_trait::async_trait;
 use bal_codec::BlockAccessList;
-use tracing::info;
+use tracing::{debug, info};
 
 /// Primary for the chain, backup for old data.
 pub struct Fallback<P, B> {
@@ -77,7 +77,7 @@ impl<P: StateSource, B: StateSource> StateSource for Fallback<P, B> {
         match self.primary.proof(addr, slots, block).await {
             Ok(p) => Ok(p),
             Err(e) => {
-                info!(block, %addr, slots = slots.len(), %e, "primary cannot prove; asking backup");
+                debug!(block, %addr, slots = slots.len(), %e, "primary cannot prove; asking backup");
                 self.backup.proof(addr, slots, block).await
             }
         }

@@ -163,6 +163,42 @@ pub struct SyncReport {
     pub unverified_blocks: f64,
 }
 
+/// Options for `backfill()`.
+#[napi(object)]
+#[derive(Default)]
+pub struct BackfillOptions {
+    /// Lowest block to read (inclusive). Default: the contract's creation.
+    pub to: Option<f64>,
+    /// Stop after this many blocks (`stopped === "budget"`); call again to continue.
+    pub max_blocks: Option<f64>,
+    /// Stop as soon as every slot with an unknown earlier value has found its
+    /// last write before the current start.
+    pub resolve_only: Option<bool>,
+}
+
+/// What one `backfill()` call did.
+#[napi(object)]
+pub struct BackfillReport {
+    /// Watch start before the call.
+    pub from: f64,
+    /// Watch start after the call: the lowest block now covered.
+    pub to: f64,
+    /// Blocks read and verified.
+    pub blocks_scanned: f64,
+    /// Slot records written.
+    pub records_written: f64,
+    /// Slots whose unknown earlier value was found.
+    pub slots_resolved: f64,
+    /// Slots whose earlier value is still unknown.
+    pub unresolved: f64,
+    /// Creation block, if known after the call.
+    pub created_at: Option<f64>,
+    /// `"target" | "creation" | "resolved" | "budget" | "preBal" | "historyUnavailable" | "nothing"`.
+    pub stopped: String,
+    /// Block for `creation`, `preBal`, `historyUnavailable`.
+    pub stopped_at: Option<f64>,
+}
+
 /// The archive. Safe to read from while `sync()` is in flight.
 #[napi]
 pub struct Archive {
@@ -239,11 +275,11 @@ impl Archive {
         &self,
         env: &'env Env,
         rpc_url: String,
-        bootstrap: Option<bool>,
+        prove: Option<bool>,
         backup_rpc: Option<String>,
     ) -> Result<PromiseRaw<'env, SyncReport>> {
         let inner = self.inner.clone();
-        let do_bootstrap = bootstrap.unwrap_or(true);
+        let do_bootstrap = prove.unwrap_or(false);
         env.spawn_future(async move {
             let src = source_with_backup(rpc_url, backup_rpc);
             let state: Option<&dyn bal_source::StateSource> =
@@ -259,6 +295,54 @@ impl Archive {
                 bootstrap_pending: r.bootstrap_pending as f64,
                 bootstrap_lost: r.bootstrap_lost as f64,
                 unverified_blocks: r.unverified_blocks as f64,
+            })
+        })
+    }
+
+    /// Extend `address`'s history backwards by reading older blocks' BALs
+    /// (no proofs; every block verified against its header). Default: until
+    /// the contract's creation. Resolves with a report; call again after
+    /// `stopped === "budget"`.
+    #[napi(ts_return_type = "Promise<BackfillReport>")]
+    pub fn backfill<'env>(
+        &self,
+        env: &'env Env,
+        rpc_url: String,
+        address: String,
+        options: Option<BackfillOptions>,
+        backup_rpc: Option<String>,
+    ) -> Result<PromiseRaw<'env, BackfillReport>> {
+        let inner = self.inner.clone();
+        let a = addr(&address)?;
+        let o = options.unwrap_or_default();
+        let opts = bal_archive::BackfillOpts {
+            to: o.to.map(|n| blocknum(n, "to")).transpose()?,
+            max_blocks: o.max_blocks.map(|n| blocknum(n, "maxBlocks")).transpose()?,
+            resolve_only: o.resolve_only.unwrap_or(false),
+        };
+        env.spawn_future(async move {
+            let src = source_with_backup(rpc_url, backup_rpc);
+            let r = inner.backfill(&src, a, opts).await.map_err(err)?;
+            use bal_archive::BackfillStop as S;
+            let (stopped, stopped_at) = match r.stopped {
+                S::Target => ("target", None),
+                S::Creation(b) => ("creation", Some(b)),
+                S::Resolved => ("resolved", None),
+                S::Budget => ("budget", None),
+                S::PreBal(b) => ("preBal", Some(b)),
+                S::HistoryUnavailable(b) => ("historyUnavailable", Some(b)),
+                S::Nothing => ("nothing", None),
+            };
+            Ok(BackfillReport {
+                from: r.from as f64,
+                to: r.to as f64,
+                blocks_scanned: r.blocks_scanned as f64,
+                records_written: r.records_written as f64,
+                slots_resolved: r.slots_resolved as f64,
+                unresolved: r.unresolved as f64,
+                created_at: r.created_at.map(|b| b as f64),
+                stopped: stopped.to_string(),
+                stopped_at: stopped_at.map(|b| b as f64),
             })
         })
     }

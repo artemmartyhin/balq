@@ -12,9 +12,11 @@
 //! is running. [`Archive::watch`] and the sync loop coordinate through a
 //! small gate so that a watch added mid-sync is never silently skipped.
 
+mod backfill;
 mod keys;
 mod sync;
 
+pub use backfill::{BackfillOpts, BackfillReport, BackfillStop};
 pub use keys::{BootState, Provenance, SCHEMA_VERSION};
 pub use sync::{SyncReport, REORG_HORIZON_FALLBACK};
 
@@ -27,18 +29,26 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
-const SLOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slots");
-const BLOCKIDX: TableDefinition<&[u8], ()> = TableDefinition::new("blockidx");
-const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
-const WATCH: TableDefinition<&[u8], u64> = TableDefinition::new("watch");
+pub(crate) const SLOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slots");
+pub(crate) const BLOCKIDX: TableDefinition<&[u8], ()> = TableDefinition::new("blockidx");
+pub(crate) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+pub(crate) const WATCH: TableDefinition<&[u8], u64> = TableDefinition::new("watch");
 /// block -> hash(32) || state_root(32)
 const HASHES: TableDefinition<u64, &[u8]> = TableDefinition::new("blockhashes");
-const BOOT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bootstrap");
+pub(crate) const BOOT: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bootstrap");
 /// addr || slot -> first_seen, for slots whose bootstrap is pending. Lets
 /// the retry path scan only what is pending instead of every slot.
-const PENDING: TableDefinition<&[u8], u64> = TableDefinition::new("pending");
+pub(crate) const PENDING: TableDefinition<&[u8], u64> = TableDefinition::new("pending");
+/// addr -> block in which the contract was created, when a verified BAL
+/// showed the creation. Before that block the account had no storage, so
+/// every slot's pre-value is zero by protocol rule (EIP-7610) — no proof
+/// needed, ever, for such an address.
+pub(crate) const CREATED: TableDefinition<&[u8], u64> = TableDefinition::new("created");
 
 const META_SCHEMA: &str = "schema_version";
+/// `anchor:<addr>` -> hash of the address's current start block, written by
+/// backfill so the next backward step can check the parent link.
+const META_ANCHOR: &str = "anchor:";
 const META_HEAD: &str = "head";
 const META_FULL_DETAIL: &str = "full_detail";
 
@@ -62,7 +72,7 @@ pub enum ArchiveError {
     InvalidStart(u64),
     /// Watching from a block the archive has already passed (or is applying
     /// right now) is backfill, not `watch`.
-    #[error("watch from block {from_block} is in the past (head {head}); backfill is not part of watch()")]
+    #[error("watch from block {from_block} is in the past (head {head}); use backfill for history before the head")]
     StartInPast {
         /// Requested start.
         from_block: u64,
@@ -129,6 +139,11 @@ pub enum ArchiveError {
         "source is inconsistent around block {0}: parent hash does not match its own block {0}-1"
     )]
     InconsistentSource(u64),
+    /// Backfill found that the node's block at the watch start is not the
+    /// block the archive holds: the start was reorged. A forward sync
+    /// resolves that; backfill will not guess which branch to extend.
+    #[error("block {0} on the node is not the block the archive holds; run sync first")]
+    StartReplaced(u64),
     /// A Merkle proof did not verify against the header's `state_root`.
     #[error("proof: {0}")]
     Proof(#[from] bal_source::ProofError),
@@ -193,21 +208,22 @@ pub enum NotAvailable {
         /// Range end (exclusive).
         end: u64,
     },
-    /// Slot has never changed since `start` and its initial value was never
-    /// proven. Call [`Archive::bootstrap_slot`] to obtain it at the head.
-    #[error("slot never changed since watch start and has not been bootstrapped yet")]
+    /// No change to the slot has been recorded since `start`, and the address
+    /// was not seen being created: its value is not known. Backfill to the
+    /// contract's creation ([`Archive::backfill`]) or prove it at the head
+    /// ([`Archive::bootstrap_slot`]).
+    #[error("no change to this slot is recorded since the watch start; backfill to the contract's creation, or prove it at the head")]
     NotBootstrapped,
-    /// The slot's first change was recorded; its earlier value awaits a proof.
-    #[error(
-        "slot first changed at block {first_seen}; its earlier value is still pending a proof"
-    )]
+    /// The slot's earliest recorded change is at `first_seen`; nothing is
+    /// known before it yet. Backfill further back, or prove it.
+    #[error("no record before block {first_seen} (the slot's earliest recorded change); backfill further back, or prove it while the node still can")]
     BootstrapPending {
-        /// Block of the first recorded change.
+        /// Block of the earliest recorded change.
         first_seen: u64,
     },
     /// The node's state window passed before a proof was obtained; the
-    /// value before `first_seen` is unobtainable.
-    #[error("slot first changed at block {first_seen}; its earlier value was lost (node state window passed before a proof was obtained)")]
+    /// value before `first_seen` can still be recovered by backfill.
+    #[error("no record before block {first_seen} (the slot's earliest recorded change); the node can no longer prove it — backfill instead")]
     BootstrapLost {
         /// Block of the first recorded change.
         first_seen: u64,
@@ -257,6 +273,9 @@ pub struct ArchiveStats {
     pub head: Option<(u64, B256)>,
     /// Watched addresses with start blocks.
     pub watches: Vec<(Address, u64)>,
+    /// Addresses whose creation was seen, with the creation block. Their
+    /// history is complete: no pre-value is ever unknown.
+    pub created: Vec<(Address, u64)>,
     /// Slot records in the primary index.
     pub slot_records: u64,
     /// Slots whose pre-value is proven.
@@ -329,6 +348,7 @@ impl Archive {
             txn.open_table(BLOCKIDX)?;
             txn.open_table(WATCH)?;
             txn.open_table(HASHES)?;
+            txn.open_table(CREATED)?;
             let boot = txn.open_table(BOOT)?;
             let mut pending = txn.open_table(PENDING)?;
             let mut meta = txn.open_table(META)?;
@@ -409,8 +429,8 @@ impl Archive {
 
     /// Start accumulating `addr` from `from_block` (inclusive). `from_block`
     /// must be above the current head and above any block the sync loop is
-    /// currently applying: history before now is backfill, a separate,
-    /// explicitly opt-in mechanism. An address can be watched once; change
+    /// currently applying: history before now is [`Archive::backfill`], an
+    /// explicit call. An address can be watched once; change
     /// its start with [`Archive::unwatch`] first (which drops its data).
     pub fn watch(&self, addr: Address, from_block: u64) -> Result<()> {
         if from_block == 0 {
@@ -465,9 +485,18 @@ impl Archive {
             for k in collect_prefix_keys(&idx, addr.as_slice())? {
                 idx.remove(k.as_slice())?;
             }
+            txn.open_table(CREATED)?.remove(addr.as_slice())?;
+            txn.open_table(META)?.remove(anchor_key(addr).as_str())?;
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Block in which `addr` was created, if a verified BAL showed it.
+    pub fn created_at(&self, addr: Address) -> Result<Option<u64>> {
+        let rtx = self.db.begin_read()?;
+        let t = rtx.open_table(CREATED)?;
+        Ok(t.get(addr.as_slice())?.map(|v| v.value()))
     }
 
     /// Watched addresses with their start blocks.
@@ -543,9 +572,15 @@ impl Archive {
         }
         let retained_headers = rtx.open_table(HASHES)?.len()?;
         let file_bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        let mut created = Vec::new();
+        for item in rtx.open_table(CREATED)?.iter()? {
+            let (k, v) = item?;
+            created.push((Address::from_slice(k.value()), v.value()));
+        }
         Ok(ArchiveStats {
             head: self.head()?,
             watches: self.watchlist()?,
+            created,
             slot_records,
             slots_done: done,
             slots_pending: pending,
@@ -656,8 +691,25 @@ impl Archive {
             });
         }
         drop(it);
-        // No record at or before `block`. Either the slot's first change is
-        // later and its pre-value is not (yet) proven, or it never changed.
+        // No record at or before `block`. If the contract's creation was
+        // seen, the slot was never written between creation and `block` (BAL
+        // completeness), and before creation the account had no storage: the
+        // value is zero, and that is a fact from a verified BAL, not a guess.
+        let created = rtx.open_table(CREATED).map_err(ArchiveError::from)?;
+        if let Some(c) = created
+            .get(addr.as_slice())
+            .map_err(ArchiveError::from)?
+            .map(|v| v.value())
+        {
+            return Ok(StorageValue {
+                value: B256::ZERO,
+                provenance: Provenance::Bal,
+                set_at: c,
+                index: u32::MAX,
+            });
+        }
+        // Otherwise the slot's earliest change is later and nothing is known
+        // before it, or it never changed at all.
         let boot = rtx.open_table(BOOT).map_err(ArchiveError::from)?;
         match boot.get(lo.as_slice()).map_err(ArchiveError::from)? {
             Some(v) => match decode_boot(v.value()) {
@@ -932,6 +984,17 @@ impl Archive {
             for b in above {
                 hashes.remove(b)?;
             }
+            // A creation seen above the fork was seen on a dead branch.
+            let mut created = txn.open_table(CREATED)?;
+            let stale: Vec<Vec<u8>> = created
+                .iter()?
+                .filter_map(|r| r.ok())
+                .filter(|(_, v)| v.value() > block)
+                .map(|(k, _)| k.value().to_vec())
+                .collect();
+            for k in stale {
+                created.remove(k.as_slice())?;
+            }
             let mut meta = txn.open_table(META)?;
             meta.insert(META_HEAD, head_bytes(block, hash).as_slice())?;
         }
@@ -965,6 +1028,7 @@ impl Archive {
             let mut idx = txn.open_table(BLOCKIDX)?;
             let mut boot = txn.open_table(BOOT)?;
             let mut pending = txn.open_table(PENDING)?;
+            let mut created = txn.open_table(CREATED)?;
             let watch_now = txn.open_table(WATCH)?;
             for (addr, start) in watches {
                 if n < *start {
@@ -978,12 +1042,22 @@ impl Archive {
                 let Some(acc) = bal.account(addr) else {
                     continue;
                 };
+                // Creation seen in a verified BAL: from here on no slot of
+                // this address needs a proof. Only a verified BAL may say so.
+                let mut is_created = created.get(addr.as_slice())?.is_some();
+                if !is_created && verified && creation_in(acc) {
+                    created.insert(addr.as_slice(), n)?;
+                    settle_created(&mut boot, &mut pending, *addr)?;
+                    is_created = true;
+                }
                 let mut fresh_here = Vec::new();
                 for sc in &acc.storage_changes {
                     let slot = sc.slot_b256();
                     let prefix = slot_prefix(*addr, slot);
                     let seen_before = boot.get(prefix.as_slice())?.is_some();
-                    if !seen_before {
+                    if !seen_before && is_created {
+                        boot.insert(prefix.as_slice(), encode_boot(BootState::Done).as_slice())?;
+                    } else if !seen_before {
                         boot.insert(
                             prefix.as_slice(),
                             encode_boot(BootState::Pending { first_seen: n }).as_slice(),
@@ -1032,6 +1106,37 @@ impl Archive {
     }
 }
 
+/// `true` if this account's changes show a contract being created: a code
+/// change to non-empty code that is not an EIP-7702 delegation designator
+/// (`0xef0100 || address`, which an EOA can set and clear while keeping its
+/// storage). Contract creation at an address with non-empty storage is
+/// impossible (EIP-7610), so this implies "no storage before this block".
+pub(crate) fn creation_in(acc: &bal_codec::AccountChanges) -> bool {
+    acc.code_changes
+        .iter()
+        .any(|c| !c.new_code.is_empty() && !c.new_code.starts_with(&[0xef, 0x01, 0x00]))
+}
+
+/// Once an address is known to be created, every slot's pre-value is zero:
+/// mark whatever was pending or lost as done and drop the retry entries.
+pub(crate) fn settle_created(
+    boot: &mut redb::Table<'_, &[u8], &[u8]>,
+    pending: &mut redb::Table<'_, &[u8], u64>,
+    addr: Address,
+) -> Result<()> {
+    for k in collect_prefix_keys(boot, addr.as_slice())? {
+        boot.insert(k.as_slice(), encode_boot(BootState::Done).as_slice())?;
+    }
+    for k in collect_prefix_keys(pending, addr.as_slice())? {
+        pending.remove(k.as_slice())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn anchor_key(addr: Address) -> String {
+    format!("{META_ANCHOR}{addr}")
+}
+
 fn head_bytes(block: u64, hash: B256) -> [u8; 40] {
     let mut b = [0u8; 40];
     b[..8].copy_from_slice(&block.to_be_bytes());
@@ -1058,7 +1163,7 @@ fn bounds<'a>(lo: &'a [u8], hi: Option<&'a [u8]>) -> impl RangeBounds<&'a [u8]> 
 }
 
 /// Every key starting with `prefix`, in order.
-fn collect_prefix_keys<V: redb::Value + 'static>(
+pub(crate) fn collect_prefix_keys<V: redb::Value + 'static>(
     t: &impl ReadableTable<&'static [u8], V>,
     prefix: &[u8],
 ) -> Result<Vec<Vec<u8>>> {

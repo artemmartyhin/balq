@@ -42,41 +42,70 @@ enum Cmd {
         #[arg(long, default_value_t = 50_000)]
         age: u64,
     },
-    /// Start accumulating an address from a block (must be > current head).
+    /// Start accumulating an address. History before the start comes from
+    /// `backfill`.
     Watch {
         address: alloy_primitives::Address,
+        /// First block to record (must be above the archive head). Default:
+        /// the node's head + 1, i.e. "from now on" (needs --rpc or balq.toml).
         #[arg(long)]
-        from: u64,
+        from: Option<u64>,
+        /// JSON-RPC endpoint, used only to learn the head when --from is omitted.
+        #[arg(long)]
+        rpc: Option<String>,
+    },
+    /// Extend an address's history backwards by reading older blocks' BALs:
+    /// no proofs, no archive node — every block is verified against its
+    /// header. Default: walk back until the contract's creation.
+    Backfill {
+        address: alloy_primitives::Address,
+        /// Lowest block to read (inclusive). Default: the contract's creation.
+        #[arg(long)]
+        to: Option<u64>,
+        /// Stop as soon as every slot with an unknown earlier value has found
+        /// its last write before the current start (usually a few blocks).
+        #[arg(long)]
+        resolve: bool,
+        /// JSON-RPC endpoint (or `rpc` from balq.toml).
+        #[arg(long)]
+        rpc: Option<String>,
+        /// Second endpoint, asked only for blocks --rpc no longer serves.
+        #[arg(long)]
+        backup_rpc: Option<String>,
+        /// Blocks per progress report.
+        #[arg(long, default_value_t = 1000)]
+        chunk: u64,
     },
     /// Stop watching and delete the address's data.
     Unwatch { address: alloy_primitives::Address },
-    /// Head, watchlist, bootstrap counts, file size.
+    /// Head, watchlist, creation per address, unknown pre-values, file size.
     Status,
-    /// Pull blocks from the node, verify, apply, bootstrap.
+    /// Pull new blocks from the node, verify each BAL against its header, apply.
     Sync {
         /// JSON-RPC endpoint (or `rpc` from balq.toml).
         #[arg(long)]
         rpc: Option<String>,
-        /// Skip eth_getProof bootstrap (slots stay pending; window still ticks).
+        /// Also prove the earlier value of newly seen slots with eth_getProof,
+        /// while the node's state window allows. Optional: `backfill` gets the
+        /// same values from older blocks without any proof.
         #[arg(long)]
-        no_bootstrap: bool,
+        prove: bool,
         /// Apply blocks whose header has no BAL hash. Debug only.
         #[arg(long)]
         allow_unverified: bool,
         /// Keep running: poll for new blocks and apply them as they arrive.
-        /// This is the mode that keeps early bootstrap inside the node's
-        /// proof window; one-shot sync after a pause loses pre-values.
+        /// After a pause (or a crash) it simply continues from the archive head.
         #[arg(long)]
         follow: bool,
         /// Poll interval in seconds for --follow.
         #[arg(long, default_value_t = 4)]
         poll: u64,
-        /// How many blocks back the node still serves eth_getProof
-        /// (or `proof_window` from balq.toml; default 120).
+        /// With --prove: how many blocks back the node still serves
+        /// eth_getProof (or `proof_window` from balq.toml; default 120).
         #[arg(long)]
         proof_window: Option<u64>,
-        /// Second endpoint (any archive provider) asked only when --rpc lacks a
-        /// block's BAL or cannot prove a slot. Verified exactly like --rpc.
+        /// Second endpoint asked only for what --rpc cannot serve (an old
+        /// block's BAL, or with --prove a proof). Verified exactly like --rpc.
         #[arg(long)]
         backup_rpc: Option<String>,
     },
@@ -94,11 +123,11 @@ enum Cmd {
         layout: Option<PathBuf>,
         #[arg(long)]
         block: u64,
-        /// If the slot was never bootstrapped, prove it now via this node
-        /// (or `rpc` from balq.toml when --prove is given).
+        /// Shortcut for a slot that never changed since the start: prove it
+        /// at the head via this node instead of backfilling to the deploy.
         #[arg(long)]
         rpc: Option<String>,
-        /// Prove a never-bootstrapped slot using the config's rpc.
+        /// Same as --rpc, using `rpc` from balq.toml.
         #[arg(long)]
         prove: bool,
         /// Backup endpoint for the proof, tried if the primary cannot serve it.
@@ -206,12 +235,33 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Probe { rpc, age } => commands::probe::run(&ctx, rpc, age).await,
-        Cmd::Watch { address, from } => commands::watch::watch(&ctx, address, from),
+        Cmd::Watch { address, from, rpc } => commands::watch::watch(&ctx, address, from, rpc).await,
         Cmd::Unwatch { address } => commands::watch::unwatch(&ctx, address),
         Cmd::Status => commands::watch::status(&ctx),
+        Cmd::Backfill {
+            address,
+            to,
+            resolve,
+            rpc,
+            backup_rpc,
+            chunk,
+        } => {
+            commands::backfill::run(
+                &ctx,
+                commands::backfill::Opts {
+                    address,
+                    to,
+                    resolve,
+                    rpc,
+                    backup_rpc,
+                    chunk,
+                },
+            )
+            .await
+        }
         Cmd::Sync {
             rpc,
-            no_bootstrap,
+            prove,
             allow_unverified,
             follow,
             poll,
@@ -222,7 +272,7 @@ async fn main() -> Result<()> {
                 &ctx,
                 commands::sync::Opts {
                     rpc,
-                    no_bootstrap,
+                    prove,
                     allow_unverified,
                     follow,
                     poll,

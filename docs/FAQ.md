@@ -9,31 +9,46 @@ Read from the same process (the Node binding does this: `sync()` runs while
 
 ### `watch from block N is in the past (head H)`
 
-`watch` starts history from *now*; it is not backfill. Pick a start above
-the current head (`eth_blockNumber + 1`). If you need the block you are
-past, that is a separate mechanism (`docs/SPEC.md` §9, not built yet).
+`watch` starts history from *now* (`--from` above the head, or omit it and
+pass `--rpc` to use the node's head + 1). History before that is
+`backfill`: `balq backfill <addr> --to N`, or without `--to` all the way to
+the contract's creation.
 
-### `NOT AVAILABLE: slot never changed since watch start and has not been bootstrapped yet`
+### `NOT AVAILABLE (NotBootstrapped)` / `<unknown: backfill>`
 
-The slot has no recorded change, so the archive has no value for it — and
-will not invent zero. Prove it: `balq get … --rpc <url>` (or
-`bootstrapSlot()` in Node) fetches an `eth_getProof` at the head, verifies
-it against `state_root`, and stores it. By BAL completeness the value at
-the head equals the value at your watch start.
+The slot has no recorded change since the start, and the archive has not
+seen the contract's creation, so it does not know the value — and will not
+invent zero. `balq backfill <addr>` walks older blocks back to the deploy;
+once the creation is seen, every untouched slot is provably zero and this
+error disappears for the whole address. (`--prove` / `bootstrapSlot()` is
+the shortcut: one `eth_getProof` at the head, if the node serves it.)
 
-### `lost, first change @N` / `BootstrapLost`
+### `no record before block N` / `BootstrapPending` / `BootstrapLost`
 
-The slot's first change was recorded at block N, but the value *before* N
-could not be proven: the node only serves `eth_getProof` inside its state
-window (public gateways: the head only, `--proof-window 0`) and the window
-passed. Post-values from N on are complete and verified; only reads in
-`[start, N)` are unavailable. To avoid it: run `sync --follow` continuously
-on a node with `--rpc.eth-proof-window 128` (reth), or pass
-`--backup-rpc <archive endpoint>` — the backup's proofs are verified too.
+The slot's earliest recorded write is at block N; what was there before is
+in some older block's BAL. `balq backfill <addr> --resolve` reads back just
+far enough to find it. Values from N on are complete and verified either
+way. `Lost` only means an optional `eth_getProof` shortcut (`sync --prove`)
+was tried and the node's state window had already passed — backfill does
+not care about that window.
 
 ### `balq probe` says `window 0`
 
-Proofs only at the head; see above. Nothing else is affected.
+The node serves `eth_getProof` only at its head. That limits `--prove`, and
+nothing else: sync and backfill never use proofs.
+
+### `the node does not serve block N (history expiry?)`
+
+Backfill reached a block the node has dropped (EIP-4444) or a pruned
+backup. Any endpoint that still has old blocks will do as `--backup-rpc`;
+it is asked for those blocks only and verified exactly like the primary.
+
+### `block N has no BAL hash (before the BAL fork)`
+
+Backfill reached the Glamsterdam activation. Older storage cannot be read
+from blocks; it can only be proven against an archive node
+(`sync --prove --backup-rpc <archive>` for slots first seen later), or
+stays unknown. Contracts deployed after the fork are not affected.
 
 ### `reorg deeper than retained block hashes`
 

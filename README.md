@@ -12,9 +12,10 @@ archive node, no indexer schema.** Built on EIP-7928 Block-Level Access
 Lists (Glamsterdam).
 
 ```
-balq watch 0x3582… --from 114563          # start following a contract
-balq sync  --rpc http://localhost:8545 --follow
-balq get   0x3582… --layout Playground.json --field "balances[0x61Cc…]" --block 114591
+balq watch    0x3582… --rpc http://localhost:8545     # from now on
+balq sync     --rpc http://localhost:8545 --follow    # forward: every new block's BAL, verified
+balq backfill 0x3582… --rpc http://localhost:8545     # backward: older blocks' BALs, down to the deploy
+balq get      0x3582… --layout Playground.json --field "balances[0x61Cc…]" --block 114591
 → balances[0x61Cc…] = 37585   (slot 0xc0e2…, set @ 114590, bal)
 ```
 
@@ -43,8 +44,9 @@ accumulates that fact, verifies it, and answers by variable name.
 1. **Completeness.** If a slot is not in the BAL, it did not change. Not
    "probably": a block with an incomplete BAL is invalid.
 2. **Verifiability.** Every stored value is checked — the BAL against the
-   header hash, bootstrap values by Merkle proof against `state_root`. Every
-   record carries its provenance.
+   header's hash, headers against each other by `parent_hash`, and the rare
+   proven value by Merkle proof against `state_root`. Every record carries
+   its provenance.
 3. **Definite boundaries.** A read returns a value or a typed reason it is
    unavailable. Never a silent zero.
 
@@ -93,25 +95,29 @@ Reducing it is tracked, not hidden.
 
 ```mermaid
 flowchart LR
-    N[full node] -- "eth_getBlockAccessList" --> C[bal-codec<br/>decode · order check<br/>keccak == header]
-    C --> A[bal-archive<br/>redb · reorgs · bootstrap]
-    N -- "eth_getProof (pre-values)" --> A
-    B[backup archive RPC<br/>optional] -. "only what the primary<br/>cannot serve, verified" .-> A
+    N[full node<br/>keeps every block] -- "eth_getBlockAccessList<br/>new blocks (sync) and<br/>old blocks (backfill)" --> C[bal-codec<br/>decode · order check<br/>keccak == header]
+    C --> A[bal-archive<br/>redb · reorgs · creation]
+    B[second endpoint<br/>optional] -. "old blocks the primary<br/>no longer serves, verified" .-> A
     A --> L[bal-layout<br/>solc storageLayout → names]
     L --> CLI[balq CLI]
-    L --> JS["balq<br/>view.balances[addr]"]
+    L --> JS["@balq/node<br/>view.balances[addr]"]
 ```
 
+- **Everything is BAL.** `sync` reads each new block's BAL forward;
+  `backfill` reads older blocks' BALs backward from the watch start. Both
+  verify the BAL against its header and the headers against each other, so
+  a record written from block 100,000 is as verified as one from the head.
+  No archive node: a full node keeps every block, and the BAL is part of it.
+- **"What was there before?"** is answered by the last earlier write
+  (backfill finds it) or by the contract's creation: a verified BAL that
+  shows the address receiving code proves there was no storage before it
+  (EIP-7610), so every untouched slot is zero — a fact, not a default.
 - **Keys** `addr ‖ slot ‖ block ‖ index` — a historical read is one ordered
   seek and a step back. A block index makes `diff` and rollback O(changed).
-- **Bootstrap.** BALs carry post-values only. The value *before* a slot's
-  first change comes from `eth_getProof` at `C-1`, verified against
-  `state_root`; a slot that never changed is proven at the head. Both
-  distinguish "zero" from "absent".
 - **Reorgs.** Parent hashes are checked per block; a fork rolls back through
-  the block index. Proofs taken on an orphaned branch are dropped.
-- **Provenance.** Every value is tagged `bal`, `proof`, or (opt-in only)
-  `unverified` / `imported`.
+  the block index.
+- **Provenance.** Every value is tagged `bal`, `proof` (optional
+  `eth_getProof` shortcut), or (opt-in only) `unverified` / `imported`.
 
 ## Install
 
@@ -136,11 +142,12 @@ Rust: `cargo add bal-archive bal-layout` — docs on [docs.rs](https://docs.rs/b
 ## Use
 
 ```
-balq probe   --rpc <url>                                   # does this node serve BALs? proof window?
-balq watch   <addr> --from <head+1>                        # storage lives at the proxy, layout at the impl
-balq sync    --rpc <url> --follow [--backup-rpc <archive>] [--proof-window N]
-balq get     <addr> --slot 0 --block N [--rpc <url>]       # raw; --rpc proves a never-changed slot
-balq get     <addr> --layout C.json --field totals.index --block N
+balq probe    --rpc <url>                                  # does this node serve BALs, how far back?
+balq watch    <addr> [--from N | --rpc <url>]              # from block N, or from the node's head + 1
+balq sync     --rpc <url> --follow                         # forward, verified, resumes after any downtime
+balq backfill <addr> --rpc <url> [--to N | --resolve]      # backward: to the deploy, to block N, or just enough
+balq get      <addr> --slot 0 --block N                    # raw slot
+balq get      <addr> --layout C.json --field totals.index --block N
 balq diff    <addr> --from A --to B [--layout C.json]      # names where possible, [raw] where not
 balq history <addr> --slot 0 --range A..B
 balq verify  --journal rows.jsonl                          # archive vs. rows you know are true
@@ -149,9 +156,9 @@ balq bench   [--rpc <url>] [--out docs/bench]              # the numbers above
 balq completions bash > /etc/bash_completion.d/balq      # zsh, fish, powershell too
 ```
 
-Every command takes `--json` for scripts (a miss is `{"error":{"code":"BootstrapLost",…}}`
-with exit code 2, never a zero). Defaults for `--rpc`, `--backup-rpc`,
-`--proof-window` and `--data` can live in `balq.toml`. Run it as a service with
+Every command takes `--json` for scripts (a miss is `{"error":{"code":"BeforeStart",…}}`
+with exit code 2, never a zero). Defaults for `--rpc`, `--backup-rpc`
+and `--data` can live in `balq.toml`. Run it as a service with
 `deploy/balq.service` or the `Dockerfile`; common errors are explained in
 [`docs/FAQ.md`](docs/FAQ.md).
 
@@ -162,9 +169,10 @@ storageLayout`, or a forge/hardhat artifact) — not the ABI.
 
 ```js
 const { Archive, Layout, NotAvailableError } = require("@balq/node");
-const ar = Archive.open("./balq.redb", { proofWindow: 0 });
+const ar = Archive.open("./balq.redb");
 ar.watch(proxy, 114563);
-await ar.sync(rpcUrl, true, backupRpc);              // reads keep working meanwhile
+await ar.sync(rpcUrl);                               // forward; reads keep working meanwhile
+await ar.backfill(rpcUrl, proxy);                    // backward, to the deploy
 
 const layout = Layout.fromFile("out/Playground.sol/Playground.json");
 const v = ar.view(proxy, layout).at(114591);
@@ -176,19 +184,24 @@ try { ar.view(proxy, layout).at(1).counter } catch (e) { e.code }          // "B
 
 | code | meaning |
 |---|---|
-| `BeforeStart` | before you started watching — history is forward-only |
+| `BeforeStart` | before the history starts — `backfill --to N` extends it |
 | `AfterHead` | sync has not reached that block yet |
-| `NotBootstrapped` | never changed since start; pass `--rpc` to prove it now |
-| `BootstrapPending` | first change recorded, proof still to come |
-| `BootstrapLost` | the node's proof window passed first (public gateways: window 0) — a `--backup-rpc` prevents this |
+| `NotBootstrapped` | the slot never changed since the start and the creation was not seen — `backfill` to the deploy |
+| `BootstrapPending` / `BootstrapLost` | the slot's earliest recorded write is at N, nothing known before it — `backfill --resolve` |
+
+None of these happen for a contract watched from (or backfilled to) its
+deploy: creation seen means every value is known.
 
 ## Limits, stated
 
-- **Forward-only.** No history before `watch`; backfill is a separate,
-  unbuilt mechanism.
-- **Proof window.** A public gateway serves proofs only at the head; the
-  value before a slot's first change then needs `--backup-rpc` or an own
-  node with `--rpc.eth-proof-window N`. Post-values are never affected.
+- **History starts at the BAL fork.** Blocks before Glamsterdam carry no
+  BAL; a contract that already lived then keeps its pre-fork storage
+  unknown unless proven against an archive node (`sync --prove`, or
+  `--backup-rpc`). Contracts deployed after the fork have complete history.
+- **The node must still serve old blocks.** Backfill reads them; a node with
+  history expiry (EIP-4444) answers `HistoryUnavailable` — pass
+  `--backup-rpc` with any endpoint that still has them. It is asked for
+  blocks only, and verified like the primary.
 - **Mappings** cannot be enumerated (keccak is one-way); reading a known key
   works, "list all holders" does not.
 - **Not yet:** header self-hash check, `subscribe()` stream, ERC-7201 /

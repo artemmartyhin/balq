@@ -15,9 +15,10 @@ npm i @balq/node        # prebuilt: win32-x64 · linux-x64 · linux-arm64 · dar
 ```js
 const { Archive, Layout, NotAvailableError } = require("@balq/node");
 
-const ar = Archive.open("./balq.redb", { proofWindow: 0 });
-ar.watch(proxy, 114563);                 // start following (must be above the current head)
-await ar.sync("http://localhost:8545");  // fetch → verify keccak(rlp(bal)) against the header → apply
+const ar = Archive.open("./balq.redb");
+ar.watch(proxy, 114563);                 // from here on (must be above the current head)
+await ar.sync("http://localhost:8545");  // forward: fetch → verify keccak(rlp(bal)) against the header → apply
+await ar.backfill("http://localhost:8545", proxy);   // backward: older blocks, down to the deploy
 
 const layout = Layout.fromFile("./out/Playground.sol/Playground.json");   // solc storageLayout / forge artifact
 const view = ar.view(proxy, layout).at(114591);                          // storage as of block 114591
@@ -66,30 +67,41 @@ view.balanses;         // compile error
 The generated interface mirrors the layout: `bigint` for integers, nested
 objects for structs, index signatures for mappings and arrays.
 
-## Sync
+## Sync and backfill — all from BALs
 
 ```js
-await ar.sync(rpcUrl);                       // one pass to the node's head
-await ar.sync(rpcUrl, true, backupRpc);      // + an archive endpoint for what the primary cannot serve
-setInterval(() => ar.sync(rpcUrl).catch(console.error), 4000);   // follow mode
+await ar.sync(rpcUrl);                                            // forward, one pass to the node's head
+setInterval(() => ar.sync(rpcUrl).catch(console.error), 4000);   // follow mode; resumes after any downtime
+
+await ar.backfill(rpcUrl, proxy);                                 // backward, to the contract's creation
+await ar.backfill(rpcUrl, proxy, { to: 100_000 });                // …or to a block
+await ar.backfill(rpcUrl, proxy, { resolveOnly: true });          // …or just enough to know every earlier value
 ```
 
-`sync` returns `{ blocksApplied, slotsWritten, bootstrapped, bootstrapPending,
-bootstrapLost, reorgedTo, … }`. Reads are safe during a sync; a second
-concurrent `sync` is refused with an error. The optional `backupRpc` (any
-archive provider) is asked only for BAL bodies and proofs the primary
-cannot serve, and is verified the same way — it adds reach, not trust.
+Both read `eth_getBlockAccessList` from an ordinary full node and verify
+every block (BAL against the header, headers chained by `parent_hash`).
+A full node keeps every block, so backfill has no window: it stops at the
+deploy (`stopped: "creation"` — from then on every untouched slot is
+provably zero), at your `to`, or when the node no longer serves a block
+(`"historyUnavailable"` — pass a `backupRpc` that still has it).
+
+`sync` returns `{ blocksApplied, slotsWritten, reorgedTo, … }`; `backfill`
+returns `{ from, to, blocksScanned, recordsWritten, slotsResolved,
+unresolved, createdAt, stopped }`. Reads are safe during either; a second
+concurrent one is refused with an error. `sync(rpc, true)` additionally
+proves newly seen slots' earlier values with `eth_getProof` while the
+node's state window allows — an optional shortcut, nothing more.
 
 ## Lower level
 
 | | |
 |---|---|
-| `Archive.open(path, { proofWindow?, fullDetail?, allowUnverified? })` | open or create |
+| `Archive.open(path, { fullDetail?, allowUnverified?, proofWindow? })` | open or create |
 | `watch(addr, fromBlock)` / `unwatch(addr)` / `watchlist()` / `head()` | watchlist and head |
 | `storageAt(addr, slot, block): { value, provenance, setAt, index }` | one raw slot, one ordered seek |
 | `history(addr, slot, from, to)` | every change in `[from, to)` |
 | `changedSlots(addr, block)` | from the block index |
-| `bootstrapSlot(rpcUrl, addr, slot, backupRpc?)` | prove a never-changed slot at the head |
+| `bootstrapSlot(rpcUrl, addr, slot, backupRpc?)` | optional: prove a never-changed slot at the head instead of backfilling |
 | `layout.locate(path)` / `decode(loc, word)` / `describeSlot(slot)` / `kindOf(path)` | what `view` is built on |
 
 `provenance` is `"bal"` (verified against the header's BAL hash),
@@ -98,11 +110,10 @@ cannot serve, and is verified the same way — it adds reach, not trust.
 
 ## What to know
 
-- **Forward-only.** History starts at `watch`; nothing before it.
-- **Proof window.** Public gateways serve `eth_getProof` only at the head;
-  then the value *before* a slot's first change is `BootstrapLost` unless
-  you pass a `backupRpc` or run your own node with `--rpc.eth-proof-window`.
-  Post-values are never affected.
+- **History starts at the BAL fork.** A contract that lived before
+  Glamsterdam keeps its pre-fork storage unknown (`stopped: "preBal"`)
+  unless proven against an archive node. Contracts deployed after the fork
+  have complete history.
 - **Mappings** cannot be enumerated (keccak is one-way): `balances[user]`
   works, "list all holders" does not.
 - **Proxies.** Watch the proxy; the layout is the implementation's.

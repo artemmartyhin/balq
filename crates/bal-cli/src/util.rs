@@ -63,11 +63,11 @@ pub fn na_short(e: &NotAvailable) -> String {
         NotAvailable::AfterHead { .. } => "<after head>".into(),
         NotAvailable::NotSynced => "<not synced>".into(),
         NotAvailable::InvalidRange { start, end } => format!("<invalid range {start}..{end}>"),
-        NotAvailable::NotBootstrapped => "<not bootstrapped>".into(),
-        NotAvailable::BootstrapPending { first_seen } => {
-            format!("<pending, first change @{first_seen}>")
+        NotAvailable::NotBootstrapped => "<unknown: backfill>".into(),
+        NotAvailable::BootstrapPending { first_seen }
+        | NotAvailable::BootstrapLost { first_seen } => {
+            format!("<unknown before @{first_seen}: backfill>")
         }
-        NotAvailable::BootstrapLost { first_seen } => format!("<lost, first change @{first_seen}>"),
         NotAvailable::Internal(s) => format!("<internal: {s}>"),
     }
 }

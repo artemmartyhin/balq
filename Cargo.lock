@@ -463,7 +463,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bal-archive"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "bal-codec"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "bal-layout"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "alloy-primitives",
  "serde",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "bal-node"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "alloy-primitives",
  "bal-archive",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "bal-source"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "balq"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "alloy-primitives",
  "anyhow",

@@ -525,3 +525,172 @@ async fn unwatch_removes_everything() {
     assert!(ar.watchlist().unwrap().is_empty());
     assert_eq!(ar.boot_state(A, slot(1)).unwrap(), None);
 }
+
+/// Watched before creation: every pre-value is zero from the BAL alone.
+#[tokio::test]
+async fn creation_settles_every_pre_value_without_proofs() {
+    let chain = Chain::new();
+    chain.push(8, A, &[], val(0), 0);
+    chain.push(9, A, &[], val(0), 0);
+    chain.push_with(10, A, &[(1, 100)], val(0), 0, true);
+    chain.push(11, A, &[], val(0), 0);
+    chain.push(12, A, &[(2, 5)], val(0), 0);
+    let (ar, _d) = open(ArchiveConfig::default());
+    ar.watch(A, 9).unwrap();
+    let rep = ar.sync(&chain, None).await.unwrap();
+    assert_eq!((rep.bootstrap_pending, rep.bootstrap_lost), (0, 0));
+    assert_eq!(ar.created_at(A).unwrap(), Some(10));
+    // Written slots read normally; unwritten ones are zero with `bal`
+    // provenance, never NotBootstrapped.
+    assert_eq!(ar.storage_at(A, slot(1), 12).unwrap().value, val(100));
+    let s2 = ar.storage_at(A, slot(2), 11).unwrap();
+    assert_eq!(
+        (s2.value, s2.provenance, s2.set_at),
+        (val(0), Provenance::Bal, 10)
+    );
+    assert_eq!(ar.storage_at(A, slot(2), 12).unwrap().value, val(5));
+    assert_eq!(ar.storage_at(A, slot(77), 9).unwrap().value, val(0));
+    let st = ar.stats().unwrap();
+    assert_eq!(st.created, vec![(A, 10)]);
+    assert_eq!((st.slots_pending, st.slots_lost, st.slots_done), (0, 0, 2));
+}
+
+/// Watched late: backfill reads older BALs and finds what the proof window
+/// could not, then reaches creation and settles the rest.
+#[tokio::test]
+async fn backfill_walks_back_to_creation() {
+    use bal_archive::{BackfillOpts, BackfillStop};
+    let chain = Chain::new();
+    chain.push_with(8, A, &[(1, 7), (3, 42)], val(0), 0, true);
+    chain.push(9, A, &[], val(0), 0);
+    chain.push(10, A, &[(1, 100)], val(0), 0);
+    chain.push(11, A, &[], val(0), 0);
+    chain.push(12, A, &[(1, 200), (2, 5)], val(0), 0);
+    chain.push(13, A, &[], val(0), 0);
+    chain.push(14, A, &[(1, 300)], val(0), 0);
+    let (ar, _d) = open(ArchiveConfig::default());
+    ar.watch(A, 13).unwrap();
+    ar.sync(&chain, None).await.unwrap();
+    assert_eq!(
+        ar.storage_at(A, slot(1), 13).unwrap_err(),
+        NotAvailable::BootstrapPending { first_seen: 14 }
+    );
+    assert!(matches!(
+        ar.storage_at(A, slot(3), 13).unwrap_err(),
+        NotAvailable::NotBootstrapped
+    ));
+
+    // Only until the one unknown pre-value is found: block 12.
+    let rep = ar
+        .backfill(
+            &chain,
+            A,
+            BackfillOpts {
+                resolve_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rep.stopped, BackfillStop::Resolved);
+    assert_eq!(
+        (rep.from, rep.to, rep.blocks_scanned, rep.slots_resolved),
+        (13, 12, 1, 1)
+    );
+    let v = ar.storage_at(A, slot(1), 13).unwrap();
+    assert_eq!(
+        (v.value, v.provenance, v.set_at),
+        (val(200), Provenance::Bal, 12)
+    );
+    assert_eq!(ar.storage_at(A, slot(2), 12).unwrap().value, val(5));
+    assert_eq!(
+        ar.storage_at(A, slot(1), 12).unwrap().value,
+        val(200),
+        "start moved down to 12"
+    );
+    assert_eq!(
+        ar.storage_at(A, slot(1), 11).unwrap_err(),
+        NotAvailable::BeforeStart {
+            requested: 11,
+            start: 12
+        }
+    );
+    // history now spans the backfilled range and is BAL data only.
+    let h = ar.history(A, slot(1), 12..15).unwrap();
+    assert_eq!(
+        h.iter().map(|e| (e.block, e.value)).collect::<Vec<_>>(),
+        vec![(12, val(200)), (14, val(300))]
+    );
+
+    // In budgeted steps down to the creation.
+    let rep = ar
+        .backfill(
+            &chain,
+            A,
+            BackfillOpts {
+                max_blocks: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!((rep.stopped, rep.to), (BackfillStop::Budget, 10));
+    assert_eq!(ar.storage_at(A, slot(1), 10).unwrap().value, val(100));
+    assert_eq!(
+        ar.storage_at(A, slot(2), 10).unwrap_err(),
+        NotAvailable::BootstrapPending { first_seen: 12 }
+    );
+    let rep = ar
+        .backfill(&chain, A, BackfillOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        (rep.stopped, rep.to, rep.created_at),
+        (BackfillStop::Creation(8), 8, Some(8))
+    );
+    assert_eq!(rep.unresolved, 0);
+    assert_eq!(ar.storage_at(A, slot(1), 9).unwrap().value, val(7));
+    assert_eq!(ar.storage_at(A, slot(3), 13).unwrap().value, val(42));
+    let z = ar.storage_at(A, slot(2), 11).unwrap();
+    assert_eq!((z.value, z.provenance), (val(0), Provenance::Bal));
+    assert_eq!(ar.stats().unwrap().slots_pending, 0);
+    // Nothing left to do.
+    let rep = ar
+        .backfill(&chain, A, BackfillOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(rep.stopped, BackfillStop::Nothing);
+}
+
+/// A block that does not link to the one above it is refused, and nothing
+/// of it is written.
+#[tokio::test]
+async fn backfill_refuses_a_broken_chain() {
+    use bal_archive::BackfillOpts;
+    let chain = Chain::new();
+    chain.push(8, A, &[(1, 1)], val(0), 0);
+    chain.push(9, A, &[(1, 2)], val(0), 0);
+    chain.push(10, A, &[(1, 3)], val(0), 0);
+    chain.push(11, A, &[], val(0), 0);
+    chain.push(12, A, &[(1, 4)], val(0), 0);
+    let (ar, _d) = open(ArchiveConfig::default());
+    ar.watch(A, 11).unwrap();
+    ar.sync(&chain, None).await.unwrap();
+    // Replace block 9 after 10 was built on the original: 10.parent != 9'.hash.
+    chain.push(9, A, &[(1, 999)], val(0), 7);
+    let err = ar
+        .backfill(&chain, A, BackfillOpts::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ArchiveError::InconsistentSource(10)), "{err}");
+    // Block 10 (valid) was written, block 9' was not; start stopped at 10.
+    assert_eq!(ar.storage_at(A, slot(1), 10).unwrap().value, val(3));
+    assert_eq!(ar.watchlist().unwrap(), vec![(A, 10)]);
+    // Unwatched or unsynced addresses are refused up front.
+    assert!(matches!(
+        ar.backfill(&chain, B, BackfillOpts::default())
+            .await
+            .unwrap_err(),
+        ArchiveError::NotWatched(_)
+    ));
+}

@@ -17,9 +17,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-bal-archive = { version = "0.1.1", path = "../bal-archive" }
-bal-layout = { version = "0.1.1", path = "../bal-layout" }
-bal-source = { version = "0.1.1", path = "../bal-source" }
+bal-archive = { version = "0.2.0", path = "../bal-archive" }
+bal-layout = { version = "0.2.0", path = "../bal-layout" }
+bal-source = { version = "0.2.0", path = "../bal-source" }
 alloy-primitives.workspace = true
 napi = { version = "3", default-features = false, features = ["napi9", "tokio_rt"] }
 napi-derive = "3"

@@ -112,8 +112,8 @@ any never-changed slot. "Read-only" is not a reason for unavailability.
 
 ## `watch(from_block)` cannot be in the past
 
-`from_block ≤ head` is `StartInPast`. Backfill (spec §9) is a separate
-mechanism, not an implicit side effect of `watch`.
+`from_block ≤ head` is `StartInPast`. Backfill (spec §9) is `Archive::backfill`,
+an explicit call, not an implicit side effect of `watch`.
 
 ## Reorg rollback needs the block index
 
@@ -262,3 +262,38 @@ one number that contradicts the spec is disk cost: 417–540 B/record vs the
 overhead. Recorded as a known limitation with the fix order (drop the
 bootstrap entry once `Done`, pack the block index, compact) rather than
 tuned away before release.
+
+## Backfill and creation: proofs become optional (2026-08-30)
+
+The v0.2 design closed the gap "what was in a slot before its first
+recorded change" with `eth_getProof` at `C-1`, inside the node's state
+window. On the public Platåberget gateway that window is 0, so every such
+slot ended `Lost`, and the fix on offer was a backup archive node. That was
+the wrong tool: the gap is a question about *changes*, and changes are what
+a full node keeps forever — the BAL is part of the block body.
+
+- **Backfill** walks from the watch start downwards: `header(n)` must equal
+  `parent_hash` of the block above (the archive holds the start block's hash,
+  or a stored anchor from the previous backfill step), `keccak(rlp(bal))`
+  must equal the header's hash. Records land with `Provenance::Bal`; the
+  watch start moves down one block per committed transaction, so a killed
+  backfill resumes exactly where it stopped. A slot's `first_seen` moves to
+  the earliest write found; what is unknown moves below it.
+- **Creation.** A verified BAL in which the address receives non-empty code
+  that is not an EIP-7702 designator (`0xef0100…`) proves the account had no
+  storage before that block (EIP-7610 forbids creation over non-empty
+  storage). `CREATED[addr] = block`; the read path returns zero with `bal`
+  provenance for any slot with no record, `set_at = creation block`, index
+  `u32::MAX`. Pending/lost entries of the address are settled to `Done`.
+  Only `verified` BALs may set it; a rollback below the creation block
+  removes it.
+- **Proofs** stay as an opt-in shortcut (`sync --prove`, `bootstrap_slot`)
+  and as the only route to pre-fork state. Defaults no longer touch
+  `eth_getProof`. `--backup-rpc` is now "an endpoint that still has old
+  blocks", not "an archive".
+- **Stops** are typed (`BackfillStop`): target, creation, resolved, budget,
+  pre-BAL block (no hash in the header), history unavailable (node dropped
+  the block). None of them is an error; all of them are reported.
+- **Schema.** New table `created` and meta key `anchor:<addr>`; key layouts
+  unchanged, `SCHEMA_VERSION` stays 1 (a v0.1 file opens and gains the
+  table on first write).

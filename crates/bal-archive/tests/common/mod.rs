@@ -5,7 +5,9 @@
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_trie::{proof::ProofRetainer, HashBuilder, Nibbles, TrieAccount};
 use async_trait::async_trait;
-use bal_codec::{AccountChanges, BlockAccessList, SlotChanges, StorageChange};
+use bal_codec::{
+    AccountChanges, BlockAccessList, CodeChange, NonceChange, SlotChanges, StorageChange,
+};
 use bal_source::{AccountProof, BalSource, Header, SourcedBlock, StateSource, StorageProof};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -144,7 +146,21 @@ impl Chain {
     /// Append a block whose BAL changes `changes` on `addr`, with a header
     /// whose state_root is `root` and whose hash depends on `salt`.
     pub fn push(&self, number: u64, addr: Address, changes: &[(u64, u64)], root: B256, salt: u8) {
-        let bal = if changes.is_empty() {
+        self.push_with(number, addr, changes, root, salt, false);
+    }
+
+    /// Like `push`; with `create`, the BAL also shows `addr` receiving code
+    /// (a contract creation) in this block.
+    pub fn push_with(
+        &self,
+        number: u64,
+        addr: Address,
+        changes: &[(u64, u64)],
+        root: B256,
+        salt: u8,
+        create: bool,
+    ) {
+        let bal = if changes.is_empty() && !create {
             BlockAccessList::default()
         } else {
             BlockAccessList {
@@ -162,8 +178,22 @@ impl Chain {
                         .collect(),
                     storage_reads: vec![],
                     balance_changes: vec![],
-                    nonce_changes: vec![],
-                    code_changes: vec![],
+                    nonce_changes: if create {
+                        vec![NonceChange {
+                            block_access_index: 0,
+                            new_nonce: 1,
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    code_changes: if create {
+                        vec![CodeChange {
+                            block_access_index: 0,
+                            new_code: Bytes::from_static(&[0x60, 0x80, 0x60, 0x40]),
+                        }]
+                    } else {
+                        vec![]
+                    },
                 }],
             }
         };
