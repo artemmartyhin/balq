@@ -1,15 +1,12 @@
-//! Watch a contract from the next block, sync once, read a slot.
+//! Watch a contract, sync to the head, backfill to its deploy, read a slot.
 //!
 //! ```
 //! cargo run -p bal-archive --example watch_and_read -- \
 //!     https://rpc.plataberget.ethpandaops.io 0x35825972e2ca90851b14576C531F13dA0B5d53ce
 //! ```
-//!
-//! On a public gateway the first pass applies nothing (the watch starts
-//! above the head); run it again a minute later to see records arrive.
 
 use alloy_primitives::{Address, B256, U256};
-use bal_archive::{Archive, NotAvailable};
+use bal_archive::{Archive, BackfillOpts, BackfillStop, NotAvailable};
 use bal_source::{BalSource, JsonRpcSource};
 
 #[tokio::main]
@@ -26,21 +23,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = JsonRpcSource::new(&rpc);
     let archive = Archive::open("example.redb")?;
 
+    // New address: start at the node's head, a block that already exists.
     if archive.watchlist()?.iter().all(|(a, _)| *a != addr) {
         let head = node.head().await?;
-        archive.watch(addr, head + 1)?;
-        println!("watching {addr} from block {}", head + 1);
+        let from = archive.head()?.map(|(h, _)| h + 1).unwrap_or(head);
+        archive.watch(addr, from)?;
+        println!("watching {addr} from block {from}");
     }
 
-    let report = archive.sync(&node, Some(&node)).await?;
+    // Forward: every new block's BAL, verified against its header.
+    let report = archive.sync(&node, None).await?;
     println!(
-        "applied {} block(s), {} record(s), bootstrap {} proven / {} pending / {} lost",
-        report.blocks_applied,
-        report.slots_written,
-        report.bootstrapped,
-        report.bootstrap_pending,
-        report.bootstrap_lost
+        "sync: {} block(s), {} record(s)",
+        report.blocks_applied, report.slots_written
     );
+
+    // Backward: older blocks' BALs, chained by parent_hash, down to the deploy.
+    // No eth_getProof, no archive node.
+    let back = archive
+        .backfill(&node, addr, BackfillOpts::default())
+        .await?;
+    match back.stopped {
+        BackfillStop::Creation(c) => {
+            println!("backfill: created at {c} — history complete ({} blocks)", back.blocks_scanned)
+        }
+        other => println!("backfill: history from {} ({other:?})", back.to),
+    }
 
     if let Some((head, _)) = archive.head()? {
         let slot0 = B256::from(U256::ZERO.to_be_bytes::<32>());
@@ -49,12 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "slot 0 @ {head}: {} (set at {}, {:?})",
                 v.value, v.set_at, v.provenance
             ),
-            Err(NotAvailable::NotBootstrapped) => {
-                println!("slot 0 never changed since the watch start; proving it at the head…");
-                archive.bootstrap_slot(&node, addr, slot0).await?;
-                let v = archive.storage_at(addr, slot0, head)?;
-                println!("slot 0 @ {head}: {} ({:?})", v.value, v.provenance);
-            }
+            Err(NotAvailable::BeforeStart { start, .. }) => println!("history starts at {start}"),
             Err(e) => println!("slot 0 @ {head}: not available — {e}"),
         }
     }

@@ -1,10 +1,15 @@
-# systemd unit for balq's follow loop. Install:
+# systemd unit for `balq index`: watches the contracts in balq.toml, fills
+# their history back to the deploy, then follows the node. Install:
 #   sudo cp deploy/balq.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now balq
-# Adjust RPC, the data path and --proof-window (see `balq probe`).
+# /var/lib/balq/balq.toml:
+#   rpc = "http://127.0.0.1:8545"
+#   data = "/var/lib/balq/balq.redb"
+#   watch = ["0x…"]
+#   layout = "/var/lib/balq/Contract.json"   # optional: field names in the log
 
 [Unit]
-Description=balq — verified contract storage archive (follow loop)
+Description=balq — verified contract storage archive
 After=network-online.target
 Wants=network-online.target
 
@@ -13,13 +18,11 @@ Type=simple
 User=balq
 Group=balq
 WorkingDirectory=/var/lib/balq
-ExecStart=/usr/local/bin/balq --data /var/lib/balq/balq.redb sync \
-    --rpc http://127.0.0.1:8545 \
-    --follow --poll 4 --proof-window 128
+ExecStart=/usr/local/bin/balq --config /var/lib/balq/balq.toml index --poll 4
 Restart=always
 RestartSec=5
-# The follow loop must keep up with the node's proof window; a long outage
-# turns first-seen slots into BootstrapLost. Restart fast, alert on downtime.
+# Downtime costs nothing: on restart the loop continues from the archive
+# head and reads the blocks it missed from the node.
 StartLimitIntervalSec=0
 NoNewPrivileges=true
 ProtectSystem=strict

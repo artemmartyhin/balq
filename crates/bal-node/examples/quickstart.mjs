@@ -3,8 +3,6 @@
 //   npm i @balq/node
 //   node quickstart.mjs https://rpc.plataberget.ethpandaops.io 0x3582… ./out/Playground.sol/Playground.json
 //
-// On a public gateway the first sync applies nothing (the watch starts
-// above the head); run it again after a block or two.
 
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
@@ -16,21 +14,24 @@ if (!address) {
   process.exit(1);
 }
 
-const ar = Archive.open("./example.redb", { proofWindow: 0 });
+const ar = Archive.open("./example.redb");
 if (!ar.watchlist().some((w) => w.address.toLowerCase() === address.toLowerCase())) {
-  // The watch must start above the current head: ask the node once.
+  // A new address starts at the node's head (a block that exists).
   const res = await fetch(rpc, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
   });
   const head = parseInt((await res.json()).result, 16);
-  ar.watch(address, head + 1);
-  console.log(`watching ${address} from block ${head + 1}`);
+  const from = ar.head() ? ar.head().number + 1 : head;
+  ar.watch(address, from);
+  console.log(`watching ${address} from block ${from}`);
 }
 
-const report = await ar.sync(rpc);
-console.log(`applied ${report.blocksApplied} block(s), ${report.slotsWritten} record(s)`);
+const report = await ar.sync(rpc);                       // forward
+console.log(`sync: ${report.blocksApplied} block(s), ${report.slotsWritten} record(s)`);
+const back = await ar.backfill(rpc, address);            // backward, to the deploy — no proofs
+console.log(`backfill: history from ${back.to} (${back.stopped}${back.createdAt ? `, created at ${back.createdAt}` : ""})`);
 
 const head = ar.head();
 if (!head) process.exit(0);

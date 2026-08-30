@@ -9,8 +9,7 @@ No network: `cargo run --release -p balq -- bench --synthetic-blocks 500`.
 into memory, timing the network separately. Pick the `top` addresses with
 the most storage writes in that window — the hottest contracts on the
 network, not a friendly sample. Open a fresh archive, `watch` them from the
-first block, `sync` from the in-memory source (`--no-bootstrap`; public
-gateways serve no historical proofs anyway). Then draw `samples` random
+first block, `sync` from the in-memory source (BALs only, no proofs). Then draw `samples` random
 `(address, slot, block)` triples from the block index, read each at a
 random later block so the seek-back path is exercised, and time it. The
 first 30 samples are also fetched with `eth_getStorageAt` on the same

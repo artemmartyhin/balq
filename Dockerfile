@@ -1,8 +1,8 @@
 # balq as a sidecar next to your node.
 #
 #   docker build -t balq .
-#   docker run -v balq-data:/data balq watch 0x… --from <head+1>
-#   docker run -v balq-data:/data balq sync --rpc http://node:8545 --follow --proof-window 128
+#   docker run -v balq-data:/data balq index 0x… --rpc http://node:8545
+#   # watches it, backfills to the deploy, follows; or mount a balq.toml and run `balq --config /data/balq.toml index`
 #
 # The archive lives in the /data volume as /data/balq.redb.
 

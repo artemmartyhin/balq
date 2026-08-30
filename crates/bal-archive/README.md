@@ -2,7 +2,7 @@
 
 Local, verified history of contract storage. Accumulates every change from
 EIP-7928 BALs into an embedded [redb](https://crates.io/crates/redb) file,
-handles reorgs and bootstrap, and answers "what was in slot X at block N"
+backfills older blocks, handles reorgs, and answers "what was in slot X at block N"
 with one ordered seek. Knows blocks and slots; knows nothing about
 Solidity — see `bal-layout` for names.
 

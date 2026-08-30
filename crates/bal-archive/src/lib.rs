@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 //!
 //! `bal-archive`: accumulate storage changes from verified BALs, serve
-//! versioned reads, handle reorgs and bootstrap. Knows blocks and slots;
+//! versioned reads, backfill older blocks, handle reorgs. Knows blocks and slots;
 //! knows nothing about Solidity.
 //!
 //! Every value in the store carries its [`Provenance`]. Every miss is a typed

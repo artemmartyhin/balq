@@ -26,13 +26,26 @@ npm i                               # ethers
 
 ## Run
 
-```
-node poke.mjs deploy                # Playground + proxy -> deploy.json
-balq watch <proxy> --from <block+1> # from deploy.json output
-balq sync --rpc $RPC --follow --proof-window 0 &   # keep it running
-node poke.mjs poke 20 15            # 20 pokes, 15 s apart -> journal.jsonl
-node poke.mjs upgrade               # new implementation, journals the 1967 slot
+The whole loop in one go (build, index to the deploy, poke, diff, verify):
 
+```
+.\demo.ps1
+```
+
+By hand — console 1 keeps running, console 2 writes:
+
+```
+node poke.mjs deploy                # once: Playground + proxy -> deploy.json
+balq index <proxy> --rpc $RPC --layout Playground.layout.json      # console 1: to the deploy, then follow
+node poke.mjs poke 20 15            # console 2: 20 pokes, 15 s apart -> journal.jsonl
+node poke.mjs upgrade               # new implementation, journals the 1967 slot
+```
+
+Every poke shows up in console 1 as one line: `117022  ▲ 6 record(s)
+counter 19 → 20, totals.index …`. Stop it (Ctrl+C; the archive is
+single-process) and read:
+
+```
 balq verify --journal journal.jsonl
 balq diff <proxy> --from A --to B --layout Playground.layout.json
 balq get  <proxy> --layout Playground.layout.json --field "balances[$ADDR]" --block B
@@ -45,38 +58,34 @@ Change both together.
 ## What the journal proves
 
 Each row is `(block, address, slot, value)` the sender knows to be true after
-its own transaction. `verify` reports `match / mismatch / not_available`;
-`not_available` rows list their reason (`BootstrapLost` is expected for the
-pre-value of a slot's first change on endpoints with proof window 0, and
-never appears for post-values).
+its own transaction. `verify` reports `match / mismatch / not_available`.
+After `index` reached the deploy nothing is `not_available`: the creation
+seen in the BAL settles every pre-value to zero, and every later value is a
+verified write.
 
-## Result 2026-08-29
+## Result 2026-08-30
 
 Deployed on Platåberget: implementation `0xf43A4277C415e02c2B2FCe1F4bef8DB890F95959`,
-proxy `0x35825972e2ca90851b14576C531F13dA0B5d53ce`, block 114562.
-12 pokes + 4 `touch()` over blocks 114565..114591, archive followed live
-(`sync --follow --poll 3 --proof-window 0`).
+proxy `0x35825972e2ca90851b14576C531F13dA0B5d53ce`, block 114562. A fresh
+archive, watched from block 116684 and backfilled to the deploy through the
+public gateway (2121 blocks, no proofs):
 
 ```
+✓ 0x3582…53ce  created at 114562 — history complete (2121 blocks, 113 records)
+
 balq verify --journal journal.jsonl
-match:          96
+match:          136
 mismatch:       0
 not_available:  0
-```
 
+balq get <proxy> --layout Playground.layout.json --field "balances[0x61Cc…]" --block 114562
+balances[0x61Cc…] = 0      (slot 0xc0e2…, @ 114562, bal)     # deploy block: zero as a fact from the BAL
+balq get <proxy> --layout Playground.layout.json --field "balances[0x61Cc…]" --block 114591
+balances[0x61Cc…] = 37585  (slot 0xc0e2…, @ 114590, bal)
 ```
-balq diff <proxy> --from 114570 --to 114574 --layout Playground.layout.json
-counter                          3 -> 5
-c                                true -> false
-totals.index                     3000000000000000611 -> 5000000000000000146
-items.length                     3 -> 5
-items[3]                         <lost, first change @114572> -> 8976949636…
-[raw] 0xc0e28e65…                8558 -> 19358          # balances[me]: mapping, cannot be named in reverse
-```
-
-`<lost …>` is the proof-window-0 consequence: the value *before* a slot's
-first change is unobtainable on this gateway. Post-values are complete.
 
 Gateway quirks met on the way: `eth_getTransactionReceipt` for a pending tx
 answers HTTP 502 instead of `null` (`poke.mjs` polls with its own
-`waitReceipt`); ethers' `tx.wait()` cannot be used against it.
+`waitReceipt`); ethers' `tx.wait()` cannot be used against it. Under load
+the gateway serves `eth_getBlockAccessList` in 8–11 s per block instead of
+~0.1 s; backfill speed follows the gateway.

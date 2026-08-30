@@ -1,7 +1,7 @@
 # End-to-end demo on the Plataberget devnet, in one run:
-#   build -> fresh archive -> watch -> sync --follow (background)
-#   -> send real transactions to the test contract -> see them land
-#   -> diff by variable name -> backfill to the deploy -> verify vs journal
+#   build -> fresh archive -> `balq index` to the deploy -> follow in the
+#   background while real transactions hit the contract -> diff by variable
+#   name -> verify every value against the sender's journal.
 #
 #   .\demo.ps1              # ~5 min; needs testbed\.env (RPC, PK with funds) and deploy.json
 #   .\demo.ps1 -SkipBuild   # reuse ..\target\release\balq.exe
@@ -27,15 +27,14 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 
-Step 1 "fresh archive, watch $C from the node's head"
-Remove-Item $DATA, demo-sync.log, demo-sync.err -ErrorAction SilentlyContinue
-$w = (& $B --data $DATA --json watch $C --rpc $RPC | ConvertFrom-Json)
-$start = [int64]$w.from
-Write-Host "    watching from block $start"
+Step 1 "fresh archive: index $C to the deploy (--once)"
+Remove-Item $DATA, demo-index.log, demo-index.err -ErrorAction SilentlyContinue
+Run index $C --rpc $RPC --layout $LAYOUT --once
+$start = [int64]((& $B --data $DATA --json status | ConvertFrom-Json).head.number)
 
-Step 2 "sync --follow in the background, then send $Pokes transaction(s) to the contract"
-$follow = Start-Process -FilePath $B -ArgumentList "--data $DATA sync --rpc $RPC --follow --poll 3" `
-    -RedirectStandardOutput demo-sync.log -RedirectStandardError demo-sync.err -PassThru -NoNewWindow
+Step 2 "index in the background (follow), then send $Pokes transaction(s)"
+$follow = Start-Process -FilePath $B -ArgumentList "--data $DATA index $C --rpc $RPC --layout $LAYOUT --poll 3" `
+    -RedirectStandardOutput demo-index.log -RedirectStandardError demo-index.err -PassThru -NoNewWindow
 try {
     node poke.mjs poke $Pokes 4
     if ($LASTEXITCODE -ne 0) { throw "poke failed (wallet funded? gateway up?)" }
@@ -45,25 +44,13 @@ try {
     Stop-Process -Id $follow.Id -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
 }
-Write-Host "    what the follower saw (demo-sync.log):" -ForegroundColor DarkGray
-Get-Content demo-sync.log | ForEach-Object { "      $_" }
+Write-Host "    what the follower printed (demo-index.log):" -ForegroundColor DarkGray
+Get-Content demo-index.log | Select-Object -Skip 12 | ForEach-Object { "      $_" }
 
-Step 3 "status, then the diff of every variable between the watch start and the head"
-Run status
+Step 3 "diff of every variable between the start of the run and the head, then verify"
 $head = [int64]((& $B --data $DATA --json status | ConvertFrom-Json).head.number)
 Run diff $C --from $start --to $head --layout $LAYOUT
-Run history $C --slot 0 --range "$start..$($head + 1)"
-
-Step 4 "backfill: walk older blocks back to the deploy (no proofs, no archive node)"
-Run backfill $C --rpc $RPC --chunk 500
-Run status
-
-Step 5 "the same variable at the deploy block, at the watch start, and now"
-$field = "balances[$($env_['ADDR'])]"
-foreach ($blk in @(114562, $start, $head)) { Run get $C --layout $LAYOUT --field $field --block $blk }
-
-Step 6 "verify every value the archive holds against the journal written by the sender"
 Run verify --journal journal.jsonl
 
 Write-Host ""
-Write-Host "done. archive: $DATA ($([math]::Round((Get-Item $DATA).Length / 1MB, 1)) MB) - delete it or keep reading from it." -ForegroundColor Green
+Write-Host "done. archive: $DATA ($([math]::Round((Get-Item $DATA).Length / 1MB, 1)) MB) - keep reading from it, or delete it." -ForegroundColor Green

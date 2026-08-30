@@ -38,7 +38,7 @@ body:
     id: setup
     attributes:
       label: Setup
-      description: Node client + version, `balq probe` output, `--proof-window`, whether a `--backup-rpc` was used, watch start block.
+      description: Node client + version, `balq probe` output, whether `--prove` or `--backup-rpc` was used, watch start block and whether the address was backfilled to its deploy.
       render: text
   - type: input
     id: version
