@@ -3,12 +3,15 @@
 //! file. Localhost, JSON, no auth — it exposes nothing the file does not.
 //!
 //! Routes (all `GET`):
+//!
+//! ```text
 //!   /status                                  → ArchiveStats
 //!   /watchlist                               → [{address, from, createdAt}]
 //!   /head                                    → {number, hash} | null
 //!   /storage/{addr}/{slot}/{block}           → StorageValue | 404 {error}
 //!   /history/{addr}/{slot}?from=A&to=B       → [HistoryEntry] | 404 {error}
 //!   /changed/{addr}/{block}                  → [slot] | 404 {error}
+//! ```
 //!
 //! A sidecar file `<archive>.serve` holds the URL; `Ctx::open` reads it
 //! when the file is locked.
