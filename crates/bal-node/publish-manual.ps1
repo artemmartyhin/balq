@@ -21,7 +21,7 @@ New-Item -ItemType Directory rel | Out-Null
 $base = "https://github.com/artemmartyhin/balq/releases/download/$tag"
 $files = @("index.js", "index.d.ts") + ($platforms | ForEach-Object { "bal-node.$_.node" })
 foreach ($f in $files) {
-    try { Invoke-WebRequest "$base/$f" -OutFile "rel\" }
+    try { Invoke-WebRequest "$base/$f" -OutFile "rel$f" }
     catch { throw "cannot download $f from the $tag release — is the CI run complete? ($_)" }
 }
 
