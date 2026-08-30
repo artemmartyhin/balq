@@ -16,3 +16,4 @@ testbed/sync.log
 crates/bal-node/npm/
 crates/bal-node/artifacts/
 **/*.node
+crates/bal-node/rel/
