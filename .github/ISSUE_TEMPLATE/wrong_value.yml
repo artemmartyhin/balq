@@ -1,0 +1,46 @@
+name: Wrong or missing value
+description: The archive answered something the chain disagrees with, or refused where it should not have.
+labels: [correctness]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every row below is one line of a `balq verify` journal; if you can fill them in,
+        the report is reproducible in one command.
+  - type: input
+    id: network
+    attributes: { label: Network / chain id, placeholder: "Platåberget (7091047534)" }
+    validations: { required: true }
+  - type: input
+    id: address
+    attributes: { label: Contract address (the watched one — the proxy, if any) }
+    validations: { required: true }
+  - type: input
+    id: slot
+    attributes: { label: Slot (0x-hex or decimal) or field path with the layout attached }
+    validations: { required: true }
+  - type: input
+    id: block
+    attributes: { label: Block }
+    validations: { required: true }
+  - type: input
+    id: expected
+    attributes: { label: Expected value and how you know it (eth_getStorageAt on an archive node, your own tx, …) }
+    validations: { required: true }
+  - type: textarea
+    id: got
+    attributes:
+      label: What balq answered
+      description: Paste the exact `balq get` output, including the provenance (`bal` / `proof`) or the `NOT AVAILABLE` reason.
+      render: text
+    validations: { required: true }
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: Node client + version, `balq probe` output, `--proof-window`, whether a `--backup-rpc` was used, watch start block.
+      render: text
+  - type: input
+    id: version
+    attributes: { label: balq version (`balq --version` / package version) }
+    validations: { required: true }

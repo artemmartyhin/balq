@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! `bal-layout`: solc `storageLayout` → slot arithmetic and typed decoding.
 //!
 //! Knows nothing about where words come from. Give it a path like

@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! `bal-archive`: accumulate storage changes from verified BALs, serve
 //! versioned reads, handle reorgs and bootstrap. Knows blocks and slots;
 //! knows nothing about Solidity.

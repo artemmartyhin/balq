@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue
+    url: https://github.com/artemmartyhin/balq/blob/main/SECURITY.md
+    about: Please do not open a public issue for vulnerabilities — see SECURITY.md.

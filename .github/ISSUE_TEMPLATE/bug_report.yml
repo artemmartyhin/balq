@@ -1,0 +1,22 @@
+name: Bug report
+description: Crash, hang, error, or behaviour that does not match the docs.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: { label: What happened, description: Command or code, full output / stack trace. }
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes: { label: What you expected }
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes: { label: Version (`balq --version`, or the npm / crate version) }
+    validations: { required: true }
+  - type: input
+    id: platform
+    attributes: { label: OS / arch / Node or Rust version }
+  - type: textarea
+    id: probe
+    attributes: { label: "`balq probe --rpc <url>` output, if a node is involved", render: text }

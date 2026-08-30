@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! Source abstraction: the archive never talks to a node directly, it talks
 //! to a [`BalSource`] (blocks + BALs) and a [`StateSource`] (Merkle proofs for
 //! bootstrap). Implementations: JSON-RPC (here), Engine API and in-process

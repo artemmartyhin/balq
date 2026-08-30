@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! EIP-7928 Block-Level Access List codec.
 //!
 //! This crate is the *only* place the 7928 wire format is known. Everything
