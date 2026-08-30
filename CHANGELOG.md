@@ -64,7 +64,7 @@ and the on-disk schema (`SCHEMA_VERSION`).
 
 ### Changed
 - Proofs are opt-in; `--no-bootstrap` removed; `ArchiveStats.created`, `NotAvailable` messages point at backfill.
-- All crates and `@balq/node` at 0.2.0 (the Node addon changed: `backfill`, `sync(rpc, prove=false)`).
+- All crates and `@balq/node` at 0.2.x (the Node addon changed: `backfill`, `sync(rpc, prove=false)`); the npm release ships as 0.2.2 with the prefetch and retry fixes.
 
 ## [0.1.1] — 2026-08-30
 
