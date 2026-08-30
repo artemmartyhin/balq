@@ -199,6 +199,30 @@ pub struct BackfillReport {
     pub stopped_at: Option<f64>,
 }
 
+fn backfill_report(r: bal_archive::BackfillReport) -> BackfillReport {
+    use bal_archive::BackfillStop as S;
+    let (stopped, stopped_at) = match r.stopped {
+        S::Target => ("target", None),
+        S::Creation(b) => ("creation", Some(b)),
+        S::Resolved => ("resolved", None),
+        S::Budget => ("budget", None),
+        S::PreBal(b) => ("preBal", Some(b)),
+        S::HistoryUnavailable(b) => ("historyUnavailable", Some(b)),
+        S::Nothing => ("nothing", None),
+    };
+    BackfillReport {
+        from: r.from as f64,
+        to: r.to as f64,
+        blocks_scanned: r.blocks_scanned as f64,
+        records_written: r.records_written as f64,
+        slots_resolved: r.slots_resolved as f64,
+        unresolved: r.unresolved as f64,
+        created_at: r.created_at.map(|b| b as f64),
+        stopped: stopped.to_string(),
+        stopped_at: stopped_at.map(|b| b as f64),
+    }
+}
+
 /// The archive. Safe to read from while `sync()` is in flight.
 #[napi]
 pub struct Archive {
@@ -323,27 +347,37 @@ impl Archive {
         env.spawn_future(async move {
             let src = source_with_backup(rpc_url, backup_rpc);
             let r = inner.backfill(&src, a, opts).await.map_err(err)?;
-            use bal_archive::BackfillStop as S;
-            let (stopped, stopped_at) = match r.stopped {
-                S::Target => ("target", None),
-                S::Creation(b) => ("creation", Some(b)),
-                S::Resolved => ("resolved", None),
-                S::Budget => ("budget", None),
-                S::PreBal(b) => ("preBal", Some(b)),
-                S::HistoryUnavailable(b) => ("historyUnavailable", Some(b)),
-                S::Nothing => ("nothing", None),
-            };
-            Ok(BackfillReport {
-                from: r.from as f64,
-                to: r.to as f64,
-                blocks_scanned: r.blocks_scanned as f64,
-                records_written: r.records_written as f64,
-                slots_resolved: r.slots_resolved as f64,
-                unresolved: r.unresolved as f64,
-                created_at: r.created_at.map(|b| b as f64),
-                stopped: stopped.to_string(),
-                stopped_at: stopped_at.map(|b| b as f64),
-            })
+            Ok(backfill_report(r))
+        })
+    }
+
+    /// `backfill()` for several addresses in one backward walk: every block
+    /// is fetched once and applied to each address. One report per address,
+    /// in input order.
+    #[napi(ts_return_type = "Promise<BackfillReport[]>")]
+    pub fn backfill_many<'env>(
+        &self,
+        env: &'env Env,
+        rpc_url: String,
+        addresses: Vec<String>,
+        options: Option<BackfillOptions>,
+        backup_rpc: Option<String>,
+    ) -> Result<PromiseRaw<'env, Vec<BackfillReport>>> {
+        let inner = self.inner.clone();
+        let addrs = addresses
+            .iter()
+            .map(|a| addr(a))
+            .collect::<Result<Vec<_>>>()?;
+        let o = options.unwrap_or_default();
+        let opts = bal_archive::BackfillOpts {
+            to: o.to.map(|n| blocknum(n, "to")).transpose()?,
+            max_blocks: o.max_blocks.map(|n| blocknum(n, "maxBlocks")).transpose()?,
+            resolve_only: o.resolve_only.unwrap_or(false),
+        };
+        env.spawn_future(async move {
+            let src = source_with_backup(rpc_url, backup_rpc);
+            let reps = inner.backfill_many(&src, &addrs, opts).await.map_err(err)?;
+            Ok(reps.into_iter().map(backfill_report).collect())
         })
     }
 

@@ -694,3 +694,52 @@ async fn backfill_refuses_a_broken_chain() {
         ArchiveError::NotWatched(_)
     ));
 }
+
+/// Two contracts, one walk: every block is read once, each address keeps
+/// its own start, creation and report.
+#[tokio::test]
+async fn backfill_many_walks_once_for_all_addresses() {
+    use bal_archive::{BackfillOpts, BackfillStop};
+    let chain = Chain::new();
+    // A created at 8, B created at 11 (its block also writes A).
+    chain.push_with(8, A, &[(1, 7)], val(0), 0, true);
+    chain.push(9, A, &[], val(0), 0);
+    chain.push(10, A, &[(1, 100)], val(0), 0);
+    chain.push_with(11, B, &[(5, 55)], val(0), 0, true);
+    chain.push(12, A, &[(1, 200)], val(0), 0);
+    chain.push(13, B, &[(5, 56)], val(0), 0);
+    chain.push(14, A, &[], val(0), 0);
+    let (ar, _d) = open(ArchiveConfig::default());
+    ar.watch(A, 14).unwrap();
+    ar.watch(B, 13).unwrap();
+    ar.sync(&chain, None).await.unwrap();
+
+    let reps = ar
+        .backfill_many(&chain, &[A, B], BackfillOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(reps.len(), 2);
+    assert_eq!(
+        (reps[0].stopped, reps[0].to),
+        (BackfillStop::Creation(8), 8)
+    );
+    assert_eq!(
+        (reps[1].stopped, reps[1].to),
+        (BackfillStop::Creation(11), 11)
+    );
+    // A read blocks 13..8 (6), B read 12..11 (2): B joined when the walk
+    // reached its start, A kept going after B was done.
+    assert_eq!((reps[0].blocks_scanned, reps[1].blocks_scanned), (6, 2));
+    assert_eq!(ar.storage_at(A, slot(1), 9).unwrap().value, val(7));
+    assert_eq!(ar.storage_at(A, slot(1), 12).unwrap().value, val(200));
+    assert_eq!(ar.storage_at(B, slot(5), 12).unwrap().value, val(55));
+    let z = ar.storage_at(B, slot(9), 11).unwrap();
+    assert_eq!((z.value, z.provenance), (val(0), Provenance::Bal));
+    assert_eq!(ar.watchlist().unwrap(), vec![(A, 8), (B, 11)]);
+    // Nothing left for either.
+    let reps = ar
+        .backfill_many(&chain, &[A, B], BackfillOpts::default())
+        .await
+        .unwrap();
+    assert!(reps.iter().all(|r| r.stopped == BackfillStop::Nothing));
+}

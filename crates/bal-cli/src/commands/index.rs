@@ -1,23 +1,22 @@
 //! `balq index`: the one command. Watch the addresses, catch up to the
-//! head, backfill each to its deploy, then follow — with the archive's
-//! state and every change shown by variable name.
+//! head, backfill them to their deploys in one backward walk, then follow —
+//! with the archive's state and every change shown by variable name.
 
 use super::Ctx;
 use crate::commands::sync::report_json;
 use crate::ui;
-use crate::util::{emit, load_layout, short};
+use crate::util::{emit, short, Layouts};
 use alloy_primitives::{Address, B256};
 use anyhow::{bail, Result};
 use bal_archive::{Archive, BackfillOpts, BackfillStop, SyncReport};
-use bal_layout::Layout;
 use bal_source::{BalSource, Fallback, JsonRpcSource};
 use serde_json::json;
-use std::path::PathBuf;
 
 pub struct Opts {
     pub addresses: Vec<Address>,
     pub rpc: Option<String>,
-    pub layout: Option<PathBuf>,
+    /// `path` (default for every address) or `0xADDR=path`; repeatable.
+    pub layout: Vec<String>,
     pub history: Option<u64>,
     pub no_backfill: bool,
     pub once: bool,
@@ -25,7 +24,7 @@ pub struct Opts {
     pub backup_rpc: Option<String>,
 }
 
-/// Blocks per backfill step between progress updates.
+/// Blocks per step between progress updates.
 const STEP: u64 = 32;
 /// Consecutive source failures tolerated by `--once` before giving up;
 /// while following there is no limit — the node will be back.
@@ -75,12 +74,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     if addrs.is_empty() {
         bail!("nothing to index: pass an address, or set `watch = [\"0x…\"]` in balq.toml");
     }
-    let layout = o
-        .layout
-        .or_else(|| ctx.cfg.layout.clone())
-        .as_deref()
-        .map(load_layout)
-        .transpose()?;
+    let layouts = Layouts::load(&ctx.cfg, &o.layout)?;
 
     let info = JsonRpcSource::new(&rpc);
     let src = Fallback::new(JsonRpcSource::new(&rpc), backup.map(JsonRpcSource::new));
@@ -111,8 +105,12 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
                 ui::dim(format!("({:.1} MB)", size as f64 / 1e6))
             ),
         );
-        if let Some(l) = &layout {
-            ui::kv("layout", format!("{} fields", l.fields().count()));
+        if !layouts.is_empty() {
+            let named = addrs.iter().filter(|a| layouts.get(a).is_some()).count();
+            ui::kv(
+                "layouts",
+                format!("{named} of {} address(es) read by field name", addrs.len()),
+            );
         }
         println!();
     }
@@ -125,8 +123,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     for a in &addrs {
         if let Some((_, from)) = watched.iter().find(|(w, _)| w == a) {
             if !ctx.json {
-                let created = ar.created_at(*a)?;
-                let state = match created {
+                let state = match ar.created_at(*a)? {
                     Some(c) => {
                         ui::green(format!("history complete since deploy at {}", ui::num(c)))
                     }
@@ -180,9 +177,9 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
             Some(pb) => {
                 pb.set_position(applied.min(total));
                 pb.set_message(ui::num(rep.to.unwrap_or(first)));
-                pb.suspend(|| render_pass(ctx, &ar, &rep, layout.as_ref(), &addrs))?;
+                pb.suspend(|| render_pass(ctx, &ar, &rep, &layouts, &addrs))?;
             }
-            None => render_pass(ctx, &ar, &rep, layout.as_ref(), &addrs)?,
+            None => render_pass(ctx, &ar, &rep, &layouts, &addrs)?,
         }
         if rep.blocks_applied == 0 || (rep.to.is_some() && rep.to >= rep.source_head) {
             break;
@@ -192,15 +189,12 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
         pb.finish_and_clear();
     }
 
-    // Backward: to the deploy, or `--history` blocks. An address whose
-    // start block the node has not produced yet is retried while following.
+    // Backward: every address in one walk, to the deploy or `--history`
+    // blocks. Addresses whose start block the node has not produced yet
+    // are retried while following.
     let mut pending: Vec<Address> = Vec::new();
     if !o.no_backfill {
-        for a in &addrs {
-            if !backfill_one(ctx, &ar, &src, *a, o.history, o.poll, o.once).await? {
-                pending.push(*a);
-            }
-        }
+        pending = backfill_all(ctx, &ar, &src, &addrs, o.history, o.poll, o.once).await?;
     }
 
     if o.once {
@@ -225,72 +219,77 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(o.poll)).await;
         match ar.sync(&src, None).await {
             Ok(rep) => {
-                render_pass(ctx, &ar, &rep, layout.as_ref(), &addrs)?;
+                render_pass(ctx, &ar, &rep, &layouts, &addrs)?;
                 if !pending.is_empty() && rep.blocks_applied > 0 {
-                    let mut still = Vec::new();
-                    for a in pending.drain(..) {
-                        if !backfill_one(ctx, &ar, &src, a, o.history, o.poll, o.once).await? {
-                            still.push(a);
-                        }
-                    }
-                    pending = still;
+                    pending =
+                        backfill_all(ctx, &ar, &src, &pending, o.history, o.poll, o.once).await?;
                 }
             }
-            Err(e) => {
-                if ctx.json {
-                    emit(&json!({ "error": e.to_string(), "retryInSeconds": o.poll }));
-                } else {
-                    ui::fail(format!("{e} — retrying in {}s", o.poll));
-                }
-            }
+            Err(e) => retry_note(ctx, &e, o.poll),
         }
     }
 }
 
-async fn backfill_one<S: BalSource + ?Sized>(
+/// Backfill `addrs` in one backward walk with a progress bar. Returns the
+/// addresses that could not start yet (the node has not produced their
+/// start block), so the caller can retry them later.
+async fn backfill_all<S: BalSource + ?Sized>(
     ctx: &Ctx,
     ar: &Archive,
     src: &S,
-    a: Address,
+    addrs: &[Address],
     history: Option<u64>,
     poll: u64,
     once: bool,
-) -> Result<bool> {
-    if ar.created_at(a)?.is_some() {
-        return Ok(true);
-    }
-    let Some((_, start)) = ar.watchlist()?.into_iter().find(|(w, _)| *w == a) else {
-        return Ok(true);
-    };
+) -> Result<Vec<Address>> {
     let archive_head = ar.head()?.map(|(h, _)| h).unwrap_or(0);
-    if archive_head < start {
-        if !ctx.json {
-            ui::warn(format!(
-                "{}  node has not produced block {} yet; backfill starts once it lands",
-                ui::bold(ui::short_addr(a)),
-                ui::num(start)
-            ));
+    let watched = ar.watchlist()?;
+    let mut ready = Vec::new();
+    let mut later = Vec::new();
+    for a in addrs {
+        if ar.created_at(*a)?.is_some() {
+            continue;
         }
-        return Ok(false);
+        let Some((_, start)) = watched.iter().find(|(w, _)| w == a) else {
+            continue;
+        };
+        if archive_head < *start {
+            if !ctx.json {
+                ui::warn(format!(
+                    "{}  node has not produced block {} yet; backfill starts once it lands",
+                    ui::bold(ui::short_addr(a)),
+                    ui::num(*start)
+                ));
+            }
+            later.push(*a);
+        } else {
+            ready.push(*a);
+        }
     }
-    let to = history.map(|h| start.saturating_sub(h).max(1));
-    let total = to.map(|t| start.saturating_sub(t));
+    if ready.is_empty() {
+        return Ok(later);
+    }
+    // Known total only with --history: the deploy block is what we are looking for.
+    let total = history.map(|h| h.min(archive_head));
     let pb = (!ctx.json).then(|| ui::walk_bar("backfill", total));
-    let (mut scanned, mut records, mut resolved) = (0u64, 0usize, 0usize);
+    let mut read = 0u64;
+    let mut sums: Vec<(u64, usize, usize)> = vec![(0, 0, 0); ready.len()];
     let mut failures = 0u32;
-    let stopped = loop {
-        let rep = match ar
-            .backfill(
-                src,
-                a,
-                BackfillOpts {
-                    to,
-                    max_blocks: Some(STEP),
-                    resolve_only: false,
-                },
-            )
-            .await
-        {
+    let reports = loop {
+        let opts = BackfillOpts {
+            to: history.map(|h| {
+                ready
+                    .iter()
+                    .filter_map(|a| watched.iter().find(|(w, _)| w == a).map(|(_, s)| *s))
+                    .max()
+                    .unwrap_or(archive_head)
+                    .saturating_sub(h)
+                    .max(1)
+            }),
+            max_blocks: Some(STEP),
+            resolve_only: false,
+        };
+        let reps = match ar.backfill_many(src, &ready, opts).await {
             Ok(r) => r,
             Err(e) => {
                 failures += 1;
@@ -306,72 +305,81 @@ async fn backfill_one<S: BalSource + ?Sized>(
             }
         };
         failures = 0;
-        scanned += rep.blocks_scanned;
-        records += rep.records_written;
-        resolved += rep.slots_resolved;
-        if let Some(pb) = &pb {
-            pb.set_position(scanned);
-            pb.set_message(ui::num(rep.to));
+        let step = reps.iter().map(|r| r.blocks_scanned).max().unwrap_or(0);
+        read += step;
+        for (s, r) in sums.iter_mut().zip(&reps) {
+            s.0 += r.blocks_scanned;
+            s.1 += r.records_written;
+            s.2 += r.slots_resolved;
         }
-        if rep.stopped != BackfillStop::Budget {
-            break rep;
+        if let Some(pb) = &pb {
+            pb.set_position(read);
+            pb.set_message(ui::num(reps.iter().map(|r| r.to).min().unwrap_or(0)));
+        }
+        if reps.iter().all(|r| r.stopped != BackfillStop::Budget) {
+            break reps;
         }
     };
     if let Some(pb) = &pb {
         pb.finish_and_clear();
     }
-    if ctx.json {
-        emit(&json!({
-            "backfill": a, "from": start, "to": stopped.to, "blocksScanned": scanned,
-            "recordsWritten": records, "slotsResolved": resolved, "unresolved": stopped.unresolved,
-            "createdAt": stopped.created_at,
-            "stopped": format!("{:?}", stopped.stopped),
-        }));
-        return Ok(true);
-    }
-    let tail = ui::dim(format!(
-        "({} blocks, {} records)",
-        ui::num(scanned),
-        ui::num(records as u64)
-    ));
-    let who = ui::bold(ui::short_addr(a));
-    match stopped.stopped {
-        BackfillStop::Creation(c) => ui::ok(format!(
-            "{who}  created at {} — history complete {tail}",
-            ui::num(c)
-        )),
-        BackfillStop::Target => ui::ok(format!(
-            "{who}  history from {} {tail}{}",
-            ui::num(stopped.to),
-            if stopped.unresolved > 0 {
-                ui::dim(format!(" · {} slot(s) unknown before their first write", stopped.unresolved))
-            } else {
-                String::new()
+    for (i, r) in reports.iter().enumerate() {
+        let a = ready[i];
+        let (scanned, records, resolved) = sums[i];
+        if ctx.json {
+            emit(&json!({
+                "backfill": a, "from": r.from, "to": r.to, "blocksScanned": scanned,
+                "recordsWritten": records, "slotsResolved": resolved, "unresolved": r.unresolved,
+                "createdAt": r.created_at, "stopped": format!("{:?}", r.stopped),
+            }));
+            continue;
+        }
+        let tail = ui::dim(format!(
+            "({} blocks, {} records)",
+            ui::num(scanned),
+            ui::num(records as u64)
+        ));
+        let who = ui::bold(ui::short_addr(a));
+        match r.stopped {
+            BackfillStop::Creation(c) => ui::ok(format!(
+                "{who}  created at {} — history complete {tail}",
+                ui::num(c)
+            )),
+            BackfillStop::Target | BackfillStop::Resolved | BackfillStop::Budget => {
+                ui::ok(format!(
+                    "{who}  history from {} {tail}{}",
+                    ui::num(r.to),
+                    if r.unresolved > 0 {
+                        ui::dim(format!(
+                            " · {} slot(s) unknown before their first write",
+                            r.unresolved
+                        ))
+                    } else {
+                        String::new()
+                    }
+                ))
             }
-        )),
-        BackfillStop::Nothing => ui::ok(format!("{who}  nothing to backfill")),
-        BackfillStop::PreBal(b) => ui::warn(format!(
-            "{who}  block {} has no BAL hash (before the fork); older state needs an archive proof {tail}",
-            ui::num(b)
-        )),
-        BackfillStop::HistoryUnavailable(b) => ui::warn(format!(
-            "{who}  node does not serve block {} — history expiry? pass --backup-rpc {tail}",
-            ui::num(b)
-        )),
-        BackfillStop::Resolved | BackfillStop::Budget => {
-            ui::ok(format!("{who}  history from {} {tail}", ui::num(stopped.to)))
+            BackfillStop::Nothing => ui::ok(format!("{who}  nothing to backfill")),
+            BackfillStop::PreBal(b) => ui::warn(format!(
+                "{who}  block {} has no BAL hash (before the fork); older state needs an archive proof {tail}",
+                ui::num(b)
+            )),
+            BackfillStop::HistoryUnavailable(b) => ui::warn(format!(
+                "{who}  node does not serve block {} — history expiry? pass --backup-rpc {tail}",
+                ui::num(b)
+            )),
         }
     }
-    Ok(true)
+    Ok(later)
 }
 
-/// One line per block with changes (fields by name when a layout is
-/// given), empty blocks collapsed into one dim line.
+/// One line per block with changes (fields by name when the address has a
+/// layout), empty blocks collapsed into one dim line.
 pub fn render_pass(
     ctx: &Ctx,
     ar: &Archive,
     rep: &SyncReport,
-    layout: Option<&Layout>,
+    layouts: &Layouts,
     addrs: &[Address],
 ) -> Result<()> {
     if ctx.json {
@@ -408,6 +416,7 @@ pub fn render_pass(
             if slots.is_empty() {
                 continue;
             }
+            let layout = layouts.get(a);
             let mut parts: Vec<String> = Vec::new();
             for slot in &slots {
                 if parts.len() == 4 {
@@ -447,7 +456,7 @@ pub fn render_pass(
 /// earlier value is not known yet.
 fn describe_change(
     ar: &Archive,
-    layout: Option<&Layout>,
+    layout: Option<&bal_layout::Layout>,
     a: Address,
     slot: B256,
     b: u64,

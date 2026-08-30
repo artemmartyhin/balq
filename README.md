@@ -145,6 +145,7 @@ Rust: `cargo add bal-archive bal-layout` — docs on [docs.rs](https://docs.rs/b
 
 ```
 balq index    <addr>... --rpc <url> [--layout C.json]       # the one command: watch + backfill to the deploy + follow
+                                                           #   several contracts: one walk, one file; --layout 0xADDR=C.json per address
 balq probe    --rpc <url>                                  # does this node serve BALs, how far back?
 balq watch    <addr> [--from N | --rpc <url>]              # the parts of `index`, for scripts:
 balq sync     --rpc <url> --follow                         #   forward, verified, resumes after any downtime
@@ -161,8 +162,9 @@ balq completions bash > /etc/bash_completion.d/balq      # zsh, fish, powershell
 
 Every command takes `--json` for scripts (a miss is `{"error":{"code":"BeforeStart",…}}`
 with exit code 2, never a zero). `balq.toml` holds the defaults: `rpc`,
-`backup_rpc`, `data`, and for `index` the `watch = ["0x…"]` list and the
-`layout` file — then it is just `balq index`. Run it as a service with
+`backup_rpc`, `data`, and for `index` the `watch = ["0x…", …]` list, the default
+`layout` and a `[layouts]` table with one layout per address (a protocol of
+several contracts) — then it is just `balq index`. Run it as a service with
 `deploy/balq.service` or the `Dockerfile`; common errors are explained in
 [`docs/FAQ.md`](docs/FAQ.md).
 

@@ -37,7 +37,7 @@ function wrap(obj, names) {
   }
 }
 
-wrap(native.Archive.prototype, ["storageAt", "history", "changedSlots", "sync", "backfill", "bootstrapSlot"]);
+wrap(native.Archive.prototype, ["storageAt", "history", "changedSlots", "sync", "backfill", "backfillMany", "bootstrapSlot"]);
 
 // ---- view -----------------------------------------------------------------
 

@@ -1,7 +1,7 @@
 use super::Ctx;
 use crate::commands::index::render_pass;
 use crate::ui;
-use crate::util::{emit, load_layout};
+use crate::util::{emit, Layouts};
 use anyhow::Result;
 use bal_archive::{Archive, ArchiveConfig, SyncReport};
 use bal_source::{Fallback, JsonRpcSource, StateSource};
@@ -79,7 +79,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
             ..Default::default()
         },
     )?;
-    let layout = ctx.cfg.layout.as_deref().map(load_layout).transpose()?;
+    let layouts = Layouts::load(&ctx.cfg, &[])?;
     let addrs: Vec<_> = ar.watchlist()?.into_iter().map(|(a, _)| a).collect();
     let src = Fallback::new(JsonRpcSource::new(&rpc), backup.map(JsonRpcSource::new));
     let state: Option<&dyn StateSource> = if o.prove { Some(&src) } else { None };
@@ -103,7 +103,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
         if !o.follow {
             break;
         }
-        render_pass(ctx, &ar, &rep, layout.as_ref(), &addrs)?;
+        render_pass(ctx, &ar, &rep, &layouts, &addrs)?;
         if rep.bootstrap_pending + rep.bootstrap_lost > 0 {
             hint(&ar, &o, ctx, &mut hinted)?;
         }
@@ -117,7 +117,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
         emit(&report_json(&rep));
         return Ok(());
     }
-    render_pass(ctx, &ar, &rep, layout.as_ref(), &addrs)?;
+    render_pass(ctx, &ar, &rep, &layouts, &addrs)?;
     match ar.head()? {
         Some((h, _)) if rep.blocks_applied == 0 => {
             ui::ok(format!("up to date at block {}", ui::num(h)))

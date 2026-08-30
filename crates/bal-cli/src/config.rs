@@ -4,9 +4,12 @@
 //! rpc = "http://127.0.0.1:8545"
 //! backup_rpc = "https://old-blocks.example"   # optional: blocks the primary no longer serves
 //! data = "/var/lib/balq/balq.redb"
-//! watch = ["0x3582…53ce"]                     # what `balq index` indexes
-//! layout = "out/Playground.sol/Playground.json"
+//! watch = ["0x3582…53ce", "0xabcd…"]          # what `balq index` indexes
+//! layout = "out/Playground.sol/Playground.json"   # default layout for field names
 //! proof_window = 128                          # only with `sync --prove`
+//!
+//! [layouts]                                   # per-address layouts (a protocol of several contracts)
+//! "0xabcd…" = "out/Vault.sol/Vault.json"
 //! ```
 //!
 //! Flags always win over the file. Looked up at `--config`, else
@@ -31,8 +34,12 @@ pub struct Config {
     /// Addresses `balq index` indexes when none are given on the command line.
     #[serde(default)]
     pub watch: Vec<alloy_primitives::Address>,
-    /// Storage layout used to name fields in `index` / `sync --follow` output.
+    /// Storage layout used to name fields in `index` / `sync --follow` output
+    /// for every address that has no entry in `layouts`.
     pub layout: Option<PathBuf>,
+    /// Per-address layouts: `[layouts]` then `"0x…" = "path.json"`.
+    #[serde(default)]
+    pub layouts: std::collections::HashMap<alloy_primitives::Address, PathBuf>,
 }
 
 impl Config {

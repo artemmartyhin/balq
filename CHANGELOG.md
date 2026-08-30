@@ -5,6 +5,17 @@ All notable changes to this project are documented here. The format follows
 [SemVer](https://semver.org/). Until 1.0, minor versions may break the API
 and the on-disk schema (`SCHEMA_VERSION`).
 
+## [0.2.3] — 2026-08-30
+
+### Added
+- `Archive::backfill_many` / `archive.backfillMany(rpc, addresses)`: several
+  contracts in one backward walk — every block fetched and verified once and
+  applied to each address, each with its own start, target and creation.
+  `balq index a b c` uses it.
+- Per-address layouts: `--layout 0xADDR=path` (repeatable, plus a plain path
+  as the default) and `[layouts]` in `balq.toml`; `index` / `sync --follow`
+  name fields per contract.
+
 ## [0.2.2] — 2026-08-30
 
 ### Added

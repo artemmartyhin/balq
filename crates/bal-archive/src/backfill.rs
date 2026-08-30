@@ -94,6 +94,30 @@ impl Drop for Guard<'_> {
     }
 }
 
+/// One address walking backwards inside [`Archive::backfill_many`].
+struct Walker {
+    addr: Address,
+    /// Current watch start; moves down one block per applied block.
+    start: u64,
+    target: u64,
+    /// Hash the archive holds for `start` (stored header or backfill anchor);
+    /// checked against the chain when the walker joins.
+    known: Option<B256>,
+    joined: bool,
+    unresolved: BTreeSet<B256>,
+    report: BackfillReport,
+    done: bool,
+}
+
+impl Walker {
+    fn stop(&mut self, why: BackfillStop) {
+        if !self.done {
+            self.report.stopped = why;
+            self.done = true;
+        }
+    }
+}
+
 impl Archive {
     /// Extend `addr`'s history backwards from its watch start. Takes the
     /// sync slot (a concurrent `sync` is refused and vice versa); reads stay
@@ -108,75 +132,114 @@ impl Archive {
         addr: Address,
         opts: BackfillOpts,
     ) -> Result<BackfillReport> {
+        let mut reports = self.backfill_many(source, &[addr], opts).await?;
+        reports
+            .pop()
+            .ok_or(ArchiveError::Corrupt("backfill produced no report"))
+    }
+
+    /// [`Archive::backfill`] for several addresses in **one** backward walk:
+    /// every block is fetched and verified once and applied to each address
+    /// whose history has not reached it yet, so a protocol of N contracts
+    /// costs the same RPC traffic as one. Each address keeps its own start,
+    /// target, creation and report; the reports come back in input order.
+    /// `max_blocks` bounds the blocks read by the walk as a whole.
+    pub async fn backfill_many<S: BalSource + ?Sized>(
+        &self,
+        source: &S,
+        addrs: &[Address],
+        opts: BackfillOpts,
+    ) -> Result<Vec<BackfillReport>> {
         if !self.begin_sync() {
             return Err(ArchiveError::SyncInProgress);
         }
         let _guard = Guard(self);
-        self.backfill_inner(source, addr, opts).await
+        self.backfill_inner(source, addrs, opts).await
     }
 
     async fn backfill_inner<S: BalSource + ?Sized>(
         &self,
         source: &S,
-        addr: Address,
+        addrs: &[Address],
         opts: BackfillOpts,
-    ) -> Result<BackfillReport> {
-        let start = self.start_of(addr)?.ok_or(ArchiveError::NotWatched(addr))?;
+    ) -> Result<Vec<BackfillReport>> {
         let head = self.head()?.map(|(h, _)| h).unwrap_or(0);
-        if head < start {
-            return Err(ArchiveError::HeadBelowStart { head, start });
-        }
-        let created = self.created_at(addr)?;
-        let mut unresolved = self.unknown_pre_values(addr)?;
-        let mut report = BackfillReport {
-            from: start,
-            to: start,
-            blocks_scanned: 0,
-            records_written: 0,
-            slots_resolved: 0,
-            unresolved: unresolved.len(),
-            created_at: created,
-            stopped: BackfillStop::Nothing,
-        };
-        let target = opts.to.unwrap_or(1).max(1);
-        if created.is_some() || target >= start || (opts.resolve_only && unresolved.is_empty()) {
-            return Ok(report);
-        }
-
-        // The block above the first one we read must be the block the
-        // archive holds — by stored hash near the head, by the backfill
-        // anchor below it. Otherwise the start block was reorged and the
-        // forward sync has to sort that out first.
-        let above = source.header(start).await?;
-        if above.number != start {
-            return Err(wrong_block(start, above.number));
-        }
-        let known = match self.header_at(start)? {
-            Some((h, _)) => Some(h),
-            None => self.anchor(addr)?,
-        };
-        if let Some(h) = known {
-            if h != above.hash {
-                return Err(ArchiveError::StartReplaced(start));
+        let mut walkers = Vec::with_capacity(addrs.len());
+        for &addr in addrs {
+            let start = self.start_of(addr)?.ok_or(ArchiveError::NotWatched(addr))?;
+            if head < start {
+                return Err(ArchiveError::HeadBelowStart { head, start });
             }
+            let created = self.created_at(addr)?;
+            let unresolved = self.unknown_pre_values(addr)?;
+            let target = opts.to.unwrap_or(1).max(1);
+            let nothing = created.is_some()
+                || target >= start
+                || (opts.resolve_only && unresolved.is_empty());
+            let known = match self.header_at(start)? {
+                Some((h, _)) => Some(h),
+                None => self.anchor(addr)?,
+            };
+            walkers.push(Walker {
+                addr,
+                start,
+                target,
+                known,
+                joined: false,
+                report: BackfillReport {
+                    from: start,
+                    to: start,
+                    blocks_scanned: 0,
+                    records_written: 0,
+                    slots_resolved: 0,
+                    unresolved: unresolved.len(),
+                    created_at: created,
+                    stopped: BackfillStop::Nothing,
+                },
+                done: nothing,
+                unresolved,
+            });
+        }
+        let Some(top) = walkers.iter().filter(|w| !w.done).map(|w| w.start).max() else {
+            return Ok(walkers.into_iter().map(|w| w.report).collect());
+        };
+
+        // The block above the first one read must be the block the archive
+        // holds — by stored hash near the head, by the backfill anchor below
+        // it. Otherwise that start was reorged and the forward sync has to
+        // sort it out first. Every walker is checked the same way when its
+        // start block is reached (`last` is then the hash of that block).
+        let above = source.header(top).await?;
+        if above.number != top {
+            return Err(wrong_block(top, above.number));
         }
         let mut expect = above.parent_hash;
+        let mut last = above.hash;
+        let mut read = 0u64;
 
         // Blocks are fetched [`FETCH_AHEAD`] at a time (the network round
         // trip dominates on a remote node) and verified strictly in order:
         // each header must be the parent of the one above it.
-        let mut cur = start - 1;
+        let mut cur = top - 1;
         'walk: loop {
-            if cur < target {
-                report.stopped = BackfillStop::Target;
-                break;
+            // Walkers whose target is above `cur` are finished.
+            for w in walkers.iter_mut() {
+                if !w.done && w.target > cur {
+                    w.stop(BackfillStop::Target);
+                }
             }
-            let mut batch = FETCH_AHEAD.min(cur - target + 1);
+            let Some(lowest_target) = walkers.iter().filter(|w| !w.done).map(|w| w.target).min()
+            else {
+                break;
+            };
+            let mut batch = FETCH_AHEAD.min(cur - lowest_target + 1);
             if let Some(m) = opts.max_blocks {
-                batch = batch.min(m.saturating_sub(report.blocks_scanned));
+                batch = batch.min(m.saturating_sub(read));
             }
             if batch == 0 {
-                report.stopped = BackfillStop::Budget;
+                for w in walkers.iter_mut() {
+                    w.stop(BackfillStop::Budget);
+                }
                 break;
             }
             let numbers: Vec<u64> = (0..batch).map(|i| cur - i).collect();
@@ -185,7 +248,9 @@ impl Archive {
                 let blk = match res {
                     Ok(blk) => blk,
                     Err(SourceError::BlockNotFound(_)) | Err(SourceError::NoBal(_)) => {
-                        report.stopped = BackfillStop::HistoryUnavailable(b);
+                        for w in walkers.iter_mut() {
+                            w.stop(BackfillStop::HistoryUnavailable(b));
+                        }
                         break 'walk;
                     }
                     Err(e) => return Err(e.into()),
@@ -197,38 +262,58 @@ impl Archive {
                     return Err(ArchiveError::InconsistentSource(b + 1));
                 }
                 let Some(bal_hash) = blk.header.block_access_list_hash else {
-                    report.stopped = BackfillStop::PreBal(b);
+                    for w in walkers.iter_mut() {
+                        w.stop(BackfillStop::PreBal(b));
+                    }
                     break 'walk;
                 };
                 blk.bal
                     .verify(bal_hash)
                     .map_err(|err| ArchiveError::Verification { block: b, err })?;
+                read += 1;
 
-                let (written, resolved, is_creation) =
-                    self.backfill_block(addr, b, &blk, &mut unresolved)?;
-                report.blocks_scanned += 1;
-                report.records_written += written;
-                report.slots_resolved += resolved;
-                report.to = b;
-                debug!(%addr, block = b, written, "backfilled");
-                expect = blk.header.parent_hash;
-                cur = b - 1;
-
-                if is_creation {
-                    report.created_at = Some(b);
-                    unresolved.clear();
-                    report.stopped = BackfillStop::Creation(b);
-                    break 'walk;
+                for w in walkers.iter_mut() {
+                    if w.done || w.start != b + 1 || w.target > b {
+                        continue;
+                    }
+                    if !w.joined {
+                        if let Some(k) = w.known {
+                            if k != last {
+                                return Err(ArchiveError::StartReplaced(w.start));
+                            }
+                        }
+                        w.joined = true;
+                    }
+                    let (written, resolved, is_creation) =
+                        self.backfill_block(w.addr, b, &blk, &mut w.unresolved)?;
+                    w.start = b;
+                    w.report.blocks_scanned += 1;
+                    w.report.records_written += written;
+                    w.report.slots_resolved += resolved;
+                    w.report.to = b;
+                    debug!(addr = %w.addr, block = b, written, "backfilled");
+                    if is_creation {
+                        w.report.created_at = Some(b);
+                        w.unresolved.clear();
+                        w.stop(BackfillStop::Creation(b));
+                    } else if opts.resolve_only && w.unresolved.is_empty() {
+                        w.stop(BackfillStop::Resolved);
+                    }
                 }
-                if opts.resolve_only && unresolved.is_empty() {
-                    report.stopped = BackfillStop::Resolved;
+                expect = blk.header.parent_hash;
+                last = blk.header.hash;
+                cur = b.saturating_sub(1);
+                if walkers.iter().all(|w| w.done) || b == 0 {
                     break 'walk;
                 }
             }
         }
-        report.unresolved = unresolved.len();
-        info!(?report, "backfill done");
-        Ok(report)
+        for w in walkers.iter_mut() {
+            w.report.unresolved = w.unresolved.len();
+            w.stop(BackfillStop::Target);
+        }
+        info!(walkers = walkers.len(), read, "backfill done");
+        Ok(walkers.into_iter().map(|w| w.report).collect())
     }
 
     /// Slots of `addr` whose pre-value is pending or lost.

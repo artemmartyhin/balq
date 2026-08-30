@@ -76,6 +76,7 @@ setInterval(() => ar.sync(rpcUrl).catch(console.error), 4000);   // follow mode;
 await ar.backfill(rpcUrl, proxy);                                 // backward, to the contract's creation
 await ar.backfill(rpcUrl, proxy, { to: 100_000 });                // …or to a block
 await ar.backfill(rpcUrl, proxy, { resolveOnly: true });          // …or just enough to know every earlier value
+await ar.backfillMany(rpcUrl, [proxy, vault, oracle]);           // a protocol: one walk, every block read once
 ```
 
 Both read `eth_getBlockAccessList` from an ordinary full node and verify

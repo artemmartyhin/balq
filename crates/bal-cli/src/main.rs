@@ -42,9 +42,10 @@ enum Cmd {
         /// JSON-RPC endpoint (or `rpc` from balq.toml).
         #[arg(long)]
         rpc: Option<String>,
-        /// Storage layout: changes are shown by variable name (or `layout` from balq.toml).
+        /// Storage layout for field names: a path (all addresses) or
+        /// `0xADDR=path` (one address); repeatable. Or `layout` / `[layouts]` in balq.toml.
         #[arg(long)]
-        layout: Option<PathBuf>,
+        layout: Vec<String>,
         /// Backfill only this many blocks back from the start (default: to the deploy).
         #[arg(long)]
         history: Option<u64>,

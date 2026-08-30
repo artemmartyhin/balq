@@ -100,3 +100,45 @@ pub fn emit(v: &Value) {
         serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
     );
 }
+
+/// Layouts by address, with an optional default for the rest.
+#[derive(Default)]
+pub struct Layouts {
+    pub default: Option<Layout>,
+    pub per: std::collections::HashMap<alloy_primitives::Address, Layout>,
+}
+
+impl Layouts {
+    /// From `balq.toml` (`layout`, `[layouts]`) and `--layout` flags, each
+    /// either a path (the default) or `0xADDR=path` (for one address).
+    /// Flags win over the file.
+    pub fn load(cfg: &crate::config::Config, flags: &[String]) -> Result<Self> {
+        let mut out = Self::default();
+        if let Some(p) = &cfg.layout {
+            out.default = Some(load_layout(p)?);
+        }
+        for (a, p) in &cfg.layouts {
+            out.per.insert(*a, load_layout(p)?);
+        }
+        for f in flags {
+            match f.split_once('=') {
+                Some((addr, path)) if addr.starts_with("0x") => {
+                    let a: alloy_primitives::Address = addr
+                        .parse()
+                        .with_context(|| format!("bad address in --layout {f}"))?;
+                    out.per.insert(a, load_layout(Path::new(path))?);
+                }
+                _ => out.default = Some(load_layout(Path::new(f))?),
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn get(&self, addr: &alloy_primitives::Address) -> Option<&Layout> {
+        self.per.get(addr).or(self.default.as_ref())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.default.is_none() && self.per.is_empty()
+    }
+}
