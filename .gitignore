@@ -19,3 +19,4 @@ crates/bal-node/artifacts/
 crates/bal-node/rel/
 testbed/demo.redb
 testbed/demo-sync.*
+crates/bal-node/rel-*/
