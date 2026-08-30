@@ -49,16 +49,21 @@ function toJs(decoded) {
     case "bool":
       return decoded.text === "true";
     default:
-      return decoded.text; // address, bytes, raw: 0x-hex
+      return decoded.text; // address, bytes, raw: 0x-hex; string: the text
   }
 }
 
 // Properties JS itself probes on any object; never storage fields.
 const PASSTHROUGH = new Set(["then", "toJSON", "constructor", "valueOf", "toString", "inspect"]);
 
-function readLeaf(archive, address, layout, block, path) {
+function readLeaf(archive, address, layout, block, path, kind) {
   const loc = layout.locate(path);
   const v = archive.storageAt(address, loc.slot, block);
+  if (kind === "value:string" || kind === "value:dynbytes") {
+    // Long values live in further slots; read them at the same block.
+    const chunks = layout.bytesDataSlots(loc, v.value).map((s) => archive.storageAt(address, s, block).value);
+    return toJs(layout.decodeBytes(loc, v.value, chunks));
+  }
   return toJs(layout.decodeValue(loc, v.value));
 }
 
@@ -78,7 +83,7 @@ function container(archive, address, layout, block, path, kind) {
       if (typeof prop === "symbol" || PASSTHROUGH.has(prop)) return undefined;
       const next = extend(String(prop));
       const k = layout.kindOf(next); // throws for unknown fields
-      if (k.startsWith("value:")) return readLeaf(archive, address, layout, block, next);
+      if (k.startsWith("value:")) return readLeaf(archive, address, layout, block, next, k);
       return container(archive, address, layout, block, next, k);
     },
     has(_, prop) {

@@ -6,6 +6,8 @@
 mod bench;
 mod commands;
 mod config;
+mod remote;
+mod serve;
 mod ui;
 mod util;
 
@@ -61,6 +63,11 @@ enum Cmd {
         /// Second endpoint, asked only for blocks --rpc no longer serves.
         #[arg(long)]
         backup_rpc: Option<String>,
+        /// Also answer reads over HTTP on this address while running, so
+        /// `balq get` / `diff` / `history` / `status` work from another
+        /// terminal despite the single-process file (default 127.0.0.1:7928).
+        #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:7928")]
+        serve: Option<String>,
     },
     /// Day 0: does this node serve BALs, for old blocks too, and proofs?
     Probe {
@@ -107,6 +114,9 @@ enum Cmd {
     },
     /// Stop watching and delete the address's data.
     Unwatch { address: alloy_primitives::Address },
+    /// Rewrite the archive file without free pages (after a long backfill).
+    /// Needs the file to itself.
+    Compact,
     /// Head, watchlist, creation per address, unknown pre-values, file size.
     Status,
     /// Pull new blocks from the node, verify each BAL against its header, apply.
@@ -181,6 +191,10 @@ enum Cmd {
         /// Name slots via a storage layout. Unresolvable slots stay `[raw]`.
         #[arg(long)]
         layout: Option<PathBuf>,
+        /// Candidate mapping keys (comma-separated addresses or numbers), so
+        /// `balances[0x…]` can be named instead of shown as a raw slot.
+        #[arg(long)]
+        keys: Option<String>,
     },
     /// Compare the archive against a journal of known-true rows
     /// (`{"block","address","slot","value"}` per line, as produced by testbed/poke.mjs).
@@ -272,6 +286,7 @@ async fn main() -> Result<()> {
             once,
             poll,
             backup_rpc,
+            serve,
         } => {
             commands::index::run(
                 &ctx,
@@ -284,6 +299,7 @@ async fn main() -> Result<()> {
                     once,
                     poll,
                     backup_rpc,
+                    serve,
                 },
             )
             .await
@@ -291,6 +307,7 @@ async fn main() -> Result<()> {
         Cmd::Probe { rpc, age } => commands::probe::run(&ctx, rpc, age).await,
         Cmd::Watch { address, from, rpc } => commands::watch::watch(&ctx, address, from, rpc).await,
         Cmd::Unwatch { address } => commands::watch::unwatch(&ctx, address),
+        Cmd::Compact => commands::compact::run(&ctx),
         Cmd::Status => commands::watch::status(&ctx),
         Cmd::Backfill {
             address,
@@ -371,7 +388,15 @@ async fn main() -> Result<()> {
             from,
             to,
             layout,
-        } => commands::diff::run(&ctx, address, from, to, layout),
+            keys,
+        } => {
+            let keys = keys
+                .as_deref()
+                .map(util::parse_keys)
+                .transpose()?
+                .unwrap_or_default();
+            commands::diff::run(&ctx, address, from, to, layout, &keys)
+        }
         Cmd::Verify {
             journal,
             show_matches,

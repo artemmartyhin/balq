@@ -251,6 +251,11 @@ async fn engine(
 
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let records = rep.slots_written.max(1) as f64;
+    // Free pages are part of the file until compaction; report both.
+    drop(ar);
+    let _ = Archive::compact_file(&path);
+    let size_compact = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(size);
+    let ar = Archive::open_with(&path, ArchiveConfig::default())?;
 
     let mut m = vec![
         metric(
@@ -285,6 +290,18 @@ async fn engine(
         ),
         metric("read p99", percentile(&lat, 0.99), "µs", "seek + step back"),
         metric("db size", size as f64 / 1e6, "MB", "redb file after sync"),
+        metric(
+            "db size compacted",
+            size_compact as f64 / 1e6,
+            "MB",
+            "same file after compact_file()",
+        ),
+        metric(
+            "bytes/record compacted",
+            size_compact as f64 / records,
+            "B",
+            "compacted size / slot records",
+        ),
         metric(
             "bytes/record",
             size as f64 / records,

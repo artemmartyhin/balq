@@ -17,8 +17,8 @@ mod keys;
 mod sync;
 
 pub use backfill::{BackfillOpts, BackfillReport, BackfillStop};
-pub use keys::{BootState, Provenance, SCHEMA_VERSION};
-pub use sync::{SyncReport, REORG_HORIZON_FALLBACK};
+pub use keys::{BootState, Provenance, OLDEST_UPGRADABLE, SCHEMA_VERSION};
+pub use sync::{SyncReport, REORG_HORIZON_FALLBACK, TOUCHED_CAP};
 
 use alloy_primitives::{Address, B256};
 use bal_codec::BlockAccessIndex;
@@ -30,7 +30,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 pub(crate) const SLOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slots");
-pub(crate) const BLOCKIDX: TableDefinition<&[u8], ()> = TableDefinition::new("blockidx");
+/// addr || block -> the slots written in that block (v3). One entry per
+/// address and block; `diff`, rendering and rollback read it.
+pub(crate) const BLOCKIDX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blockslots");
+/// v1/v2 block index (one key per slot), migrated on open and dropped.
+const LEGACY_BLOCKIDX: TableDefinition<&[u8], ()> = TableDefinition::new("blockidx");
 pub(crate) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 pub(crate) const WATCH: TableDefinition<&[u8], u64> = TableDefinition::new("watch");
 /// block -> hash(32) || state_root(32)
@@ -165,7 +169,8 @@ from_redb!(
     redb::TransactionError,
     redb::TableError,
     redb::StorageError,
-    redb::CommitError
+    redb::CommitError,
+    redb::CompactionError
 );
 
 /// Result of archive operations.
@@ -213,19 +218,13 @@ pub enum NotAvailable {
     /// contract's creation ([`Archive::backfill`]) or prove it at the head
     /// ([`Archive::bootstrap_slot`]).
     #[error("no change to this slot is recorded since the watch start; backfill to the contract's creation, or prove it at the head")]
-    NotBootstrapped,
+    NeverRecorded,
     /// The slot's earliest recorded change is at `first_seen`; nothing is
-    /// known before it yet. Backfill further back, or prove it.
-    #[error("no record before block {first_seen} (the slot's earliest recorded change); backfill further back, or prove it while the node still can")]
-    BootstrapPending {
+    /// known before it yet. Backfill further back (or prove it while the
+    /// node's state window still allows).
+    #[error("no record before block {first_seen} (the slot's earliest recorded change); backfill further back")]
+    UnknownBefore {
         /// Block of the earliest recorded change.
-        first_seen: u64,
-    },
-    /// The node's state window passed before a proof was obtained; the
-    /// value before `first_seen` can still be recovered by backfill.
-    #[error("no record before block {first_seen} (the slot's earliest recorded change); the node can no longer prove it — backfill instead")]
-    BootstrapLost {
-        /// Block of the first recorded change.
         first_seen: u64,
     },
     /// Storage failure surfaced through a read.
@@ -360,7 +359,14 @@ impl Archive {
                             .try_into()
                             .map_err(|_| ArchiveError::Corrupt("schema_version"))?,
                     );
-                    if found != SCHEMA_VERSION {
+                    if (OLDEST_UPGRADABLE..SCHEMA_VERSION).contains(&found) {
+                        if found < 3 {
+                            migrate_block_index(&txn)?;
+                        }
+                        // Stamp the new version so an older build refuses
+                        // the file cleanly from now on.
+                        meta.insert(META_SCHEMA, SCHEMA_VERSION.to_be_bytes().as_slice())?;
+                    } else if found != SCHEMA_VERSION {
                         return Err(ArchiveError::SchemaMismatch {
                             found,
                             expected: SCHEMA_VERSION,
@@ -490,6 +496,16 @@ impl Archive {
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Rewrite the file without free pages. redb frees pages as records are
+    /// overwritten and transactions retire, but never shrinks the file on
+    /// its own; after a long backfill the difference is large. Needs the
+    /// file to itself: call with no [`Archive`] open on it. Returns whether
+    /// anything changed.
+    pub fn compact_file(path: impl AsRef<Path>) -> Result<bool> {
+        let mut db = Database::open(path.as_ref())?;
+        Ok(db.compact()?)
     }
 
     /// Block in which `addr` was created, if a verified BAL showed it.
@@ -713,18 +729,15 @@ impl Archive {
         let boot = rtx.open_table(BOOT).map_err(ArchiveError::from)?;
         match boot.get(lo.as_slice()).map_err(ArchiveError::from)? {
             Some(v) => match decode_boot(v.value()) {
-                Some(BootState::Pending { first_seen }) => {
-                    Err(NotAvailable::BootstrapPending { first_seen })
-                }
-                Some(BootState::Lost { first_seen }) => {
-                    Err(NotAvailable::BootstrapLost { first_seen })
+                Some(BootState::Pending { first_seen }) | Some(BootState::Lost { first_seen }) => {
+                    Err(NotAvailable::UnknownBefore { first_seen })
                 }
                 Some(BootState::Done) => Err(NotAvailable::Internal(
                     "bootstrap marked done but no record".into(),
                 )),
                 None => Err(NotAvailable::Internal("bad bootstrap record".into())),
             },
-            None => Err(NotAvailable::NotBootstrapped),
+            None => Err(NotAvailable::NeverRecorded),
         }
     }
 
@@ -778,14 +791,15 @@ impl Archive {
         self.check_range(addr, block)?;
         let rtx = self.db.begin_read().map_err(ArchiveError::from)?;
         let t = rtx.open_table(BLOCKIDX).map_err(ArchiveError::from)?;
-        let prefix = blockidx_prefix(addr, block);
-        let mut out = Vec::new();
-        for k in collect_prefix_keys(&t, &prefix)? {
-            let (_, _, slot) =
-                parse_blockidx_key(&k).ok_or(NotAvailable::Internal("bad blockidx key".into()))?;
-            out.push(slot);
+        match t
+            .get(blockidx_key(addr, block).as_slice())
+            .map_err(ArchiveError::from)?
+        {
+            Some(v) => {
+                decode_slots(v.value()).ok_or(NotAvailable::Internal("bad blockidx value".into()))
+            }
+            None => Ok(Vec::new()),
         }
-        Ok(out)
     }
 
     /// Bootstrap state of a slot, if it has ever been seen or proven.
@@ -939,41 +953,44 @@ impl Archive {
                     }
                     continue;
                 }
-                let lo = blockidx_prefix(*addr, block + 1);
+                let lo = blockidx_key(*addr, block + 1);
                 let hi = prefix_end(addr.as_slice());
                 let mut victims = Vec::new();
                 for item in idx.range::<&[u8]>(bounds(&lo, hi.as_deref()))? {
-                    let (k, _) = item?;
-                    victims.push(k.value().to_vec());
+                    let (k, v) = item?;
+                    victims.push((k.value().to_vec(), v.value().to_vec()));
                 }
-                for k in victims {
-                    let (_, b, slot) =
-                        parse_blockidx_key(&k).ok_or(ArchiveError::Corrupt("blockidx"))?;
-                    let sl = slot_key(*addr, slot, b, 0);
-                    let sh = slot_key(*addr, slot, b, u32::MAX);
-                    let ks: Vec<Vec<u8>> = slots
-                        .range::<&[u8]>(sl.as_slice()..=sh.as_slice())?
-                        .map(|r| r.map(|(k, _)| k.value().to_vec()))
-                        .collect::<std::result::Result<_, _>>()?;
-                    for sk in ks {
-                        slots.remove(sk.as_slice())?;
+                for (k, v) in victims {
+                    let (_, b) = parse_blockidx_key(&k).ok_or(ArchiveError::Corrupt("blockidx"))?;
+                    let written =
+                        decode_slots(&v).ok_or(ArchiveError::Corrupt("blockidx value"))?;
+                    for slot in written {
+                        let sl = slot_key(*addr, slot, b, 0);
+                        let sh = slot_key(*addr, slot, b, u32::MAX);
+                        let ks: Vec<Vec<u8>> = slots
+                            .range::<&[u8]>(sl.as_slice()..=sh.as_slice())?
+                            .map(|r| r.map(|(k, _)| k.value().to_vec()))
+                            .collect::<std::result::Result<_, _>>()?;
+                        for sk in ks {
+                            slots.remove(sk.as_slice())?;
+                        }
+                        // A slot first seen above the fork was never seen on
+                        // the canonical chain: forget its pending/lost state.
+                        let bk = slot_prefix(*addr, slot);
+                        let forget = match boot
+                            .get(bk.as_slice())?
+                            .and_then(|v| decode_boot(v.value()))
+                        {
+                            Some(BootState::Pending { first_seen })
+                            | Some(BootState::Lost { first_seen }) => first_seen > block,
+                            _ => false,
+                        };
+                        if forget {
+                            boot.remove(bk.as_slice())?;
+                            pending.remove(bk.as_slice())?;
+                        }
                     }
                     idx.remove(k.as_slice())?;
-                    // A slot first seen above the fork was never seen on the
-                    // canonical chain: forget its pending/lost state.
-                    let bk = slot_prefix(*addr, slot);
-                    let forget = match boot
-                        .get(bk.as_slice())?
-                        .and_then(|v| decode_boot(v.value()))
-                    {
-                        Some(BootState::Pending { first_seen })
-                        | Some(BootState::Lost { first_seen }) => first_seen > block,
-                        _ => false,
-                    };
-                    if forget {
-                        boot.remove(bk.as_slice())?;
-                        pending.remove(bk.as_slice())?;
-                    }
                 }
             }
             let mut hashes = txn.open_table(HASHES)?;
@@ -1051,8 +1068,10 @@ impl Archive {
                     is_created = true;
                 }
                 let mut fresh_here = Vec::new();
+                let mut changed = Vec::with_capacity(acc.storage_changes.len());
                 for sc in &acc.storage_changes {
                     let slot = sc.slot_b256();
+                    changed.push(slot);
                     let prefix = slot_prefix(*addr, slot);
                     let seen_before = boot.get(prefix.as_slice())?.is_some();
                     if !seen_before && is_created {
@@ -1081,7 +1100,12 @@ impl Archive {
                         )?;
                         written += 1;
                     }
-                    idx.insert(blockidx_key(*addr, n, slot).as_slice(), ())?;
+                }
+                if !changed.is_empty() {
+                    idx.insert(
+                        blockidx_key(*addr, n).as_slice(),
+                        encode_slots(&changed).as_slice(),
+                    )?;
                 }
                 if !fresh_here.is_empty() {
                     fresh.push((*addr, *start, fresh_here));
@@ -1130,6 +1154,34 @@ pub(crate) fn settle_created(
     for k in collect_prefix_keys(pending, addr.as_slice())? {
         pending.remove(k.as_slice())?;
     }
+    Ok(())
+}
+
+/// v1/v2 -> v3: regroup the per-slot block index into one entry per
+/// (address, block), then drop the old table. Runs inside the open
+/// transaction, so a crash midway leaves the old layout and version intact.
+fn migrate_block_index(txn: &redb::WriteTransaction) -> Result<()> {
+    let mut grouped: std::collections::BTreeMap<(Address, u64), Vec<B256>> =
+        std::collections::BTreeMap::new();
+    {
+        let old = txn.open_table(LEGACY_BLOCKIDX)?;
+        for item in old.iter()? {
+            let (k, _) = item?;
+            let (a, b, s) = parse_legacy_blockidx_key(k.value())
+                .ok_or(ArchiveError::Corrupt("legacy blockidx"))?;
+            grouped.entry((a, b)).or_default().push(s);
+        }
+    }
+    {
+        let mut new = txn.open_table(BLOCKIDX)?;
+        for ((a, b), slots) in &grouped {
+            new.insert(
+                blockidx_key(*a, *b).as_slice(),
+                encode_slots(slots).as_slice(),
+            )?;
+        }
+    }
+    txn.delete_table(LEGACY_BLOCKIDX)?;
     Ok(())
 }
 

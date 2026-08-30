@@ -14,7 +14,7 @@ pass `--rpc` to use the node's head + 1). History before that is
 `backfill`: `balq backfill <addr> --to N`, or without `--to` all the way to
 the contract's creation.
 
-### `NOT AVAILABLE (NotBootstrapped)` / `<unknown: backfill>`
+### `NOT AVAILABLE (NeverRecorded)` / `<unknown: backfill>`
 
 The slot has no recorded change since the start, and the archive has not
 seen the contract's creation, so it does not know the value — and will not
@@ -23,7 +23,7 @@ once the creation is seen, every untouched slot is provably zero and this
 error disappears for the whole address. (`--prove` / `bootstrapSlot()` is
 the shortcut: one `eth_getProof` at the head, if the node serves it.)
 
-### `no record before block N` / `BootstrapPending` / `BootstrapLost`
+### `no record before block N` / `UnknownBefore`
 
 The slot's earliest recorded write is at block N; what was there before is
 in some older block's BAL. `balq backfill <addr> --resolve` reads back just

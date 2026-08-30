@@ -33,7 +33,7 @@ fn stop_json(s: BackfillStop) -> serde_json::Value {
 pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     let rpc = ctx.cfg.rpc(o.rpc)?;
     let backup = o.backup_rpc.or_else(|| ctx.cfg.backup_rpc.clone());
-    let ar = ctx.open()?;
+    let ar = ctx.open_local()?;
     let src = Fallback::new(JsonRpcSource::new(&rpc), backup.map(JsonRpcSource::new));
 
     let start = ar

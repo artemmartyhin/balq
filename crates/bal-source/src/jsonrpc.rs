@@ -121,9 +121,11 @@ impl JsonRpcSource {
         // JSON form is a few times larger. 64 MiB is generous.
         if let Some(len) = http.content_length() {
             if len > MAX_BODY_BYTES {
-                return Err(SourceError::Transport(format!(
-                    "{method}: response of {len} bytes exceeds the {MAX_BODY_BYTES}-byte limit"
-                )));
+                return Err(SourceError::TooLarge {
+                    method: method.into(),
+                    bytes: len,
+                    limit: MAX_BODY_BYTES,
+                });
             }
         }
         let mut http = http;
@@ -134,9 +136,11 @@ impl JsonRpcSource {
             .map_err(|e| SourceError::Transport(format!("{method}: {e}")))?
         {
             if body.len() + chunk.len() > MAX_BODY_BYTES as usize {
-                return Err(SourceError::Transport(format!(
-                    "{method}: response exceeds the {MAX_BODY_BYTES}-byte limit"
-                )));
+                return Err(SourceError::TooLarge {
+                    method: method.into(),
+                    bytes: (body.len() + chunk.len()) as u64,
+                    limit: MAX_BODY_BYTES,
+                });
             }
             body.extend_from_slice(&chunk);
         }
@@ -378,9 +382,21 @@ fn parse_header(v: &Value) -> Result<Header> {
         .filter(|x| !x.is_null())
         .map(|x| parse_b256(x, BAL_HASH_FIELD))
         .transpose()?;
+    let hash = parse_b256(field(v, "hash")?, "hash")?;
+    // The hash is recomputed from the header fields (EIP-7928 fields
+    // included): a node cannot hand out a header whose fields do not match
+    // the hash the chain is linked by.
+    let consensus: alloy_consensus::Header = serde_json::from_value(v.clone())
+        .map_err(|e| SourceError::Malformed(format!("header fields: {e}")))?;
+    let computed = consensus.hash_slow();
+    if computed != hash {
+        return Err(SourceError::Malformed(format!(
+            "header {num}: hash {hash} does not match its fields (keccak(rlp(header)) = {computed})"
+        )));
+    }
     Ok(Header {
         number: parse_hex_u64(num)?,
-        hash: parse_b256(field(v, "hash")?, "hash")?,
+        hash,
         parent_hash: parse_b256(field(v, "parentHash")?, "parentHash")?,
         state_root: parse_b256(field(v, "stateRoot")?, "stateRoot")?,
         timestamp: parse_hex_u64(ts)?,
@@ -467,5 +483,78 @@ impl StateSource for JsonRpcSource {
                 })
                 .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A one-thread HTTP server that answers each connection with the next
+    /// canned response and counts how many requests it saw.
+    fn serve(responses: Vec<String>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        std::thread::spawn(move || {
+            for resp in responses {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        (url, seen)
+    }
+
+    fn http(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn transport_failure_is_retried_then_succeeds() {
+        let ok = r#"{"jsonrpc":"2.0","id":1,"result":"0x10"}"#;
+        let (url, seen) = serve(vec![
+            http("502 Bad Gateway", "<html>cloudflare</html>"),
+            http("503 Service Unavailable", ""),
+            http("200 OK", ok),
+        ]);
+        let src = JsonRpcSource::new(&url);
+        let v = src.call("eth_blockNumber", json!([])).await.unwrap();
+        assert_eq!(v, json!("0x10"));
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn rpc_errors_and_oversized_bodies_are_not_retried() {
+        let rpc_err = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"nope"}}"#;
+        let (url, seen) = serve(vec![http("200 OK", rpc_err), http("200 OK", rpc_err)]);
+        let src = JsonRpcSource::new(&url);
+        let e = src.call("eth_getProof", json!([])).await.unwrap_err();
+        assert!(matches!(e, SourceError::Rpc { code: -32602, .. }), "{e}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "an RPC error is final");
+
+        let huge = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        let (url, seen) = serve(vec![huge.clone(), huge]);
+        let src = JsonRpcSource::new(&url);
+        let e = src
+            .call("eth_getBlockAccessList", json!([]))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, SourceError::TooLarge { .. }), "{e}");
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "the cap is final too");
     }
 }

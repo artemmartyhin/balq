@@ -48,7 +48,7 @@ try {
 ```
 
 `code` ∈ `NotWatched · BeforeStart · AfterHead · NotSynced · InvalidRange ·
-NotBootstrapped · BootstrapPending · BootstrapLost · Internal`.
+NeverRecorded · UnknownBefore · Internal`.
 
 ## Types: `typegen`
 

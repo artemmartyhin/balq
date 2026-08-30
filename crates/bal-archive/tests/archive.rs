@@ -109,7 +109,7 @@ async fn sync_reads_and_bounds() {
     // s3 never changed: needs lazy bootstrap at head
     assert_eq!(
         ar.storage_at(A, slot(3), 10).unwrap_err(),
-        NotAvailable::NotBootstrapped
+        NotAvailable::NeverRecorded
     );
     ar.bootstrap_slot(&world, A, slot(3)).await.unwrap();
     let s3 = ar.storage_at(A, slot(3), 10).unwrap();
@@ -157,7 +157,7 @@ async fn pending_then_resolved_then_lost() {
     assert_eq!(rep.bootstrap_pending, 2);
     assert_eq!(
         ar.storage_at(A, slot(2), 11).unwrap_err(),
-        NotAvailable::BootstrapPending { first_seen: 12 }
+        NotAvailable::UnknownBefore { first_seen: 12 }
     );
 
     // Later sync with state: s2 (first seen 12, proof at 11, head 14 -> age 3 <= window) resolves;
@@ -303,7 +303,7 @@ async fn proof_with_unrequested_slot_is_rejected() {
     );
     assert_eq!(
         ar.storage_at(A, slot(3), 10).unwrap_err(),
-        NotAvailable::NotBootstrapped
+        NotAvailable::NeverRecorded
     );
 }
 
@@ -320,13 +320,13 @@ async fn lazy_bootstrap_never_stores_a_post_value() {
     ar.sync(&chain, Some(&world)).await.unwrap();
     assert!(matches!(
         ar.storage_at(A, slot(2), 11),
-        Err(NotAvailable::BootstrapLost { .. })
+        Err(NotAvailable::UnknownBefore { .. })
     ));
     // A lazy bootstrap at head 14 would prove the POST-change value 5; it must be refused.
     ar.bootstrap_slot(&world, A, slot(2)).await.unwrap();
     assert!(matches!(
         ar.storage_at(A, slot(2), 11),
-        Err(NotAvailable::BootstrapLost { .. })
+        Err(NotAvailable::UnknownBefore { .. })
     ));
 }
 
@@ -374,7 +374,7 @@ async fn reorg_below_start_drops_proofs() {
     );
     assert_eq!(
         ar.storage_at(A, slot(3), 12).unwrap_err(),
-        NotAvailable::NotBootstrapped
+        NotAvailable::NeverRecorded
     );
 }
 
@@ -541,7 +541,7 @@ async fn creation_settles_every_pre_value_without_proofs() {
     assert_eq!((rep.bootstrap_pending, rep.bootstrap_lost), (0, 0));
     assert_eq!(ar.created_at(A).unwrap(), Some(10));
     // Written slots read normally; unwritten ones are zero with `bal`
-    // provenance, never NotBootstrapped.
+    // provenance, never NeverRecorded.
     assert_eq!(ar.storage_at(A, slot(1), 12).unwrap().value, val(100));
     let s2 = ar.storage_at(A, slot(2), 11).unwrap();
     assert_eq!(
@@ -573,11 +573,11 @@ async fn backfill_walks_back_to_creation() {
     ar.sync(&chain, None).await.unwrap();
     assert_eq!(
         ar.storage_at(A, slot(1), 13).unwrap_err(),
-        NotAvailable::BootstrapPending { first_seen: 14 }
+        NotAvailable::UnknownBefore { first_seen: 14 }
     );
     assert!(matches!(
         ar.storage_at(A, slot(3), 13).unwrap_err(),
-        NotAvailable::NotBootstrapped
+        NotAvailable::NeverRecorded
     ));
 
     // Only until the one unknown pre-value is found: block 12.
@@ -638,7 +638,7 @@ async fn backfill_walks_back_to_creation() {
     assert_eq!(ar.storage_at(A, slot(1), 10).unwrap().value, val(100));
     assert_eq!(
         ar.storage_at(A, slot(2), 10).unwrap_err(),
-        NotAvailable::BootstrapPending { first_seen: 12 }
+        NotAvailable::UnknownBefore { first_seen: 12 }
     );
     let rep = ar
         .backfill(&chain, A, BackfillOpts::default())
@@ -742,4 +742,191 @@ async fn backfill_many_walks_once_for_all_addresses() {
         .await
         .unwrap();
     assert!(reps.iter().all(|r| r.stopped == BackfillStop::Nothing));
+}
+
+/// `sync_step` applies at most `max_blocks` per call and says where the
+/// source head is, so a caller can show progress; the steps add up to a
+/// plain `sync`.
+#[tokio::test]
+async fn sync_step_budget_adds_up() {
+    let (_, chain) = world();
+    let (ar, _d) = open(ArchiveConfig::default());
+    ar.watch(A, 10).unwrap();
+    let r1 = ar.sync_step(&chain, None, Some(2)).await.unwrap();
+    assert_eq!((r1.from, r1.to, r1.blocks_applied), (Some(10), Some(11), 2));
+    assert_eq!(r1.source_head, Some(14));
+    let r2 = ar.sync_step(&chain, None, Some(2)).await.unwrap();
+    assert_eq!((r2.from, r2.to, r2.blocks_applied), (Some(12), Some(13), 2));
+    let r3 = ar.sync_step(&chain, None, Some(2)).await.unwrap();
+    assert_eq!((r3.to, r3.blocks_applied), (Some(14), 1));
+    assert_eq!(r3.to, r3.source_head);
+    let r4 = ar.sync_step(&chain, None, Some(2)).await.unwrap();
+    assert_eq!(r4.blocks_applied, 0);
+    assert_eq!(ar.storage_at(A, slot(1), 14).unwrap().value, val(300));
+}
+
+/// An EIP-7702 delegation designator is a code change but not a creation:
+/// an EOA keeps its storage across delegations, so nothing may be settled.
+#[tokio::test]
+async fn delegation_designator_is_not_a_creation() {
+    use alloy_primitives::Bytes;
+    use bal_codec::{AccountChanges, BlockAccessList, CodeChange, SlotChanges, StorageChange};
+    use bal_source::{Header, SourcedBlock};
+    let chain = Chain::new();
+    chain.push(8, A, &[], val(0), 0);
+    // Hand-built block 9: A gets 0xef0100‖addr code and writes slot 1.
+    let bal = BlockAccessList {
+        accounts: vec![AccountChanges {
+            address: A,
+            storage_changes: vec![SlotChanges {
+                slot: U256::from(1),
+                changes: vec![StorageChange {
+                    block_access_index: 1,
+                    value: U256::from(5),
+                }],
+            }],
+            storage_reads: vec![],
+            balance_changes: vec![],
+            nonce_changes: vec![],
+            code_changes: vec![CodeChange {
+                block_access_index: 0,
+                new_code: Bytes::from([&[0xef, 0x01, 0x00][..], B.as_slice()].concat()),
+            }],
+        }],
+    };
+    let parent = chain.blocks.lock().unwrap()[&8].header.hash;
+    let hash =
+        alloy_primitives::keccak256([&9u64.to_be_bytes()[..], bal.hash().as_slice()].concat());
+    chain.blocks.lock().unwrap().insert(
+        9,
+        SourcedBlock {
+            header: Header {
+                number: 9,
+                hash,
+                parent_hash: parent,
+                state_root: val(0),
+                timestamp: 108,
+                block_access_list_hash: Some(bal.hash()),
+            },
+            bal,
+        },
+    );
+    let (ar, _d) = open(ArchiveConfig::default());
+    ar.watch(A, 9).unwrap();
+    ar.sync(&chain, None).await.unwrap();
+    assert_eq!(ar.created_at(A).unwrap(), None);
+    assert_eq!(ar.storage_at(A, slot(1), 9).unwrap().value, val(5));
+    assert!(matches!(
+        ar.storage_at(A, slot(2), 9).unwrap_err(),
+        NotAvailable::NeverRecorded
+    ));
+}
+
+/// Unwatching before a backfill walk: refused up front, nothing written.
+#[tokio::test]
+async fn unwatched_address_cannot_be_backfilled() {
+    use bal_archive::BackfillOpts;
+    let chain = Chain::new();
+    chain.push_with(8, A, &[(1, 7)], val(0), 0, true);
+    chain.push(9, A, &[(1, 8)], val(0), 0);
+    chain.push(10, A, &[], val(0), 0);
+    let (ar, _d) = open(ArchiveConfig::default());
+    ar.watch(A, 10).unwrap();
+    ar.sync(&chain, None).await.unwrap();
+    ar.unwatch(A).unwrap();
+    assert!(matches!(
+        ar.backfill(&chain, A, BackfillOpts::default())
+            .await
+            .unwrap_err(),
+        ArchiveError::NotWatched(_)
+    ));
+    assert_eq!(ar.stats().unwrap().slot_records, 0);
+}
+
+/// A v2 file (per-slot block index, fixed 33-byte values) opens as v3: the
+/// index is regrouped on open, old values still decode, the version is
+/// stamped so an older build refuses the file.
+#[test]
+fn v2_file_is_migrated_on_open() {
+    use redb::{Database, TableDefinition, TableHandle};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.redb");
+    {
+        let db = Database::create(&path).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut meta = txn
+                .open_table(TableDefinition::<&str, &[u8]>::new("meta"))
+                .unwrap();
+            meta.insert("schema_version", 2u32.to_be_bytes().as_slice())
+                .unwrap();
+            meta.insert("full_detail", [0u8].as_slice()).unwrap();
+            let mut head = [0u8; 40];
+            head[..8].copy_from_slice(&12u64.to_be_bytes());
+            meta.insert("head", head.as_slice()).unwrap();
+            let mut watch = txn
+                .open_table(TableDefinition::<&[u8], u64>::new("watch"))
+                .unwrap();
+            watch.insert(A.as_slice(), 10u64).unwrap();
+            let mut slots = txn
+                .open_table(TableDefinition::<&[u8], &[u8]>::new("slots"))
+                .unwrap();
+            let mut legacy = txn
+                .open_table(TableDefinition::<&[u8], ()>::new("blockidx"))
+                .unwrap();
+            for (b, s, v) in [(10u64, 1u64, 100u64), (12, 1, 200), (12, 2, 5)] {
+                let mut key = Vec::new();
+                key.extend_from_slice(A.as_slice());
+                key.extend_from_slice(slot(s).as_slice());
+                key.extend_from_slice(&b.to_be_bytes());
+                key.extend_from_slice(&1u32.to_be_bytes());
+                let mut value = vec![0u8]; // tag Bal, fixed 32-byte word
+                value.extend_from_slice(val(v).as_slice());
+                slots.insert(key.as_slice(), value.as_slice()).unwrap();
+                let mut lk = Vec::new();
+                lk.extend_from_slice(A.as_slice());
+                lk.extend_from_slice(&b.to_be_bytes());
+                lk.extend_from_slice(slot(s).as_slice());
+                legacy.insert(lk.as_slice(), ()).unwrap();
+            }
+            let mut boot = txn
+                .open_table(TableDefinition::<&[u8], &[u8]>::new("bootstrap"))
+                .unwrap();
+            for s in [1u64, 2] {
+                let mut bk = Vec::new();
+                bk.extend_from_slice(A.as_slice());
+                bk.extend_from_slice(slot(s).as_slice());
+                let mut state = vec![2u8]; // Lost
+                state.extend_from_slice(&(if s == 1 { 10u64 } else { 12 }).to_be_bytes());
+                boot.insert(bk.as_slice(), state.as_slice()).unwrap();
+            }
+            txn.open_table(TableDefinition::<&[u8], u64>::new("pending"))
+                .unwrap();
+            txn.open_table(TableDefinition::<u64, &[u8]>::new("blockhashes"))
+                .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let ar = Archive::open(&path).unwrap();
+    assert_eq!(ar.changed_slots(A, 12).unwrap(), vec![slot(1), slot(2)]);
+    assert_eq!(ar.changed_slots(A, 10).unwrap(), vec![slot(1)]);
+    assert_eq!(ar.storage_at(A, slot(1), 11).unwrap().value, val(100));
+    assert_eq!(ar.storage_at(A, slot(2), 12).unwrap().value, val(5));
+    assert_eq!(
+        ar.storage_at(A, slot(2), 11).unwrap_err(),
+        NotAvailable::UnknownBefore { first_seen: 12 }
+    );
+    drop(ar);
+    // Stamped: the legacy table is gone and the version is current.
+    let db = Database::open(&path).unwrap();
+    let rtx = db.begin_read().unwrap();
+    let meta = rtx
+        .open_table(TableDefinition::<&str, &[u8]>::new("meta"))
+        .unwrap();
+    let v = meta.get("schema_version").unwrap().unwrap();
+    assert_eq!(
+        u32::from_be_bytes(v.value().try_into().unwrap()),
+        bal_archive::SCHEMA_VERSION
+    );
+    assert!(rtx.list_tables().unwrap().all(|t| t.name() != "blockidx"));
 }

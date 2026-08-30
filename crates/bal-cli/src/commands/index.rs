@@ -22,6 +22,8 @@ pub struct Opts {
     pub once: bool,
     pub poll: u64,
     pub backup_rpc: Option<String>,
+    /// Answer reads over HTTP on this address while running.
+    pub serve: Option<String>,
 }
 
 /// Blocks per step between progress updates.
@@ -79,7 +81,27 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     let info = JsonRpcSource::new(&rpc);
     let src = Fallback::new(JsonRpcSource::new(&rpc), backup.map(JsonRpcSource::new));
     let head = src.head().await?;
-    let ar = ctx.open()?;
+    let ar = std::sync::Arc::new(ctx.open_local()?);
+    let _served = match &o.serve {
+        Some(listen) => {
+            let (url, guard) = crate::serve::start(ar.clone(), &ctx.data, listen)?;
+            if ctx.json {
+                emit(&json!({ "serving": url }));
+            } else {
+                ui::kv(
+                    "serve",
+                    format!(
+                        "{url}  {}",
+                        ui::dim(
+                            "— other `balq get/diff/history/status` on this file read from here"
+                        )
+                    ),
+                );
+            }
+            Some(guard)
+        }
+        None => None,
+    };
 
     if !ctx.json {
         ui::banner();
@@ -150,44 +172,10 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
 
     // Forward first, in steps with progress: backfill needs the archive at
     // (or above) each start.
-    let first = ar.head()?.map(|(h, _)| h + 1).unwrap_or(new_start);
-    let total = if head >= first { head - first + 1 } else { 0 };
-    let pb = (!ctx.json && total > 0).then(|| ui::walk_bar("sync", Some(total)));
-    let mut applied = 0u64;
-    let mut failures = 0u32;
-    loop {
-        let rep = match ar.sync_step(&src, None, Some(STEP)).await {
-            Ok(r) => r,
-            Err(e) => {
-                failures += 1;
-                if o.once && failures > MAX_FAILURES {
-                    return Err(e.into());
-                }
-                match &pb {
-                    Some(pb) => pb.suspend(|| retry_note(ctx, &e, o.poll)),
-                    None => retry_note(ctx, &e, o.poll),
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(o.poll)).await;
-                continue;
-            }
-        };
-        failures = 0;
-        applied += rep.blocks_applied;
-        match &pb {
-            Some(pb) => {
-                pb.set_position(applied.min(total));
-                pb.set_message(ui::num(rep.to.unwrap_or(first)));
-                pb.suspend(|| render_pass(ctx, &ar, &rep, &layouts, &addrs))?;
-            }
-            None => render_pass(ctx, &ar, &rep, &layouts, &addrs)?,
-        }
-        if rep.blocks_applied == 0 || (rep.to.is_some() && rep.to >= rep.source_head) {
-            break;
-        }
-    }
-    if let Some(pb) = &pb {
-        pb.finish_and_clear();
-    }
+    catch_up(
+        ctx, &ar, &src, &layouts, &addrs, new_start, head, o.once, o.poll,
+    )
+    .await?;
 
     // Backward: every address in one walk, to the deploy or `--history`
     // blocks. Addresses whose start block the node has not produced yet
@@ -217,6 +205,24 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     }
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(o.poll)).await;
+        // Far behind (after a pause): catch up in steps with a bar.
+        if let (Ok(node), Some((mine, _))) = (src.head().await, ar.head()?) {
+            if node > mine + STEP {
+                catch_up(
+                    ctx,
+                    &ar,
+                    &src,
+                    &layouts,
+                    &addrs,
+                    mine + 1,
+                    node,
+                    false,
+                    o.poll,
+                )
+                .await?;
+                continue;
+            }
+        }
         match ar.sync(&src, None).await {
             Ok(rep) => {
                 render_pass(ctx, &ar, &rep, &layouts, &addrs)?;
@@ -228,6 +234,60 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
             Err(e) => retry_note(ctx, &e, o.poll),
         }
     }
+}
+
+/// Apply blocks up to the node's head in steps of [`STEP`], with a bar
+/// when there is more than one step to go, rendering each step's changes.
+#[allow(clippy::too_many_arguments)]
+async fn catch_up<S: BalSource + ?Sized>(
+    ctx: &Ctx,
+    ar: &Archive,
+    src: &S,
+    layouts: &Layouts,
+    addrs: &[Address],
+    first: u64,
+    head: u64,
+    once: bool,
+    poll: u64,
+) -> Result<()> {
+    let total = if head >= first { head - first + 1 } else { 0 };
+    let pb = (!ctx.json && total > STEP).then(|| ui::walk_bar("sync", Some(total)));
+    let mut applied = 0u64;
+    let mut failures = 0u32;
+    loop {
+        let rep = match ar.sync_step(src, None, Some(STEP)).await {
+            Ok(r) => r,
+            Err(e) => {
+                failures += 1;
+                if once && failures > MAX_FAILURES {
+                    return Err(e.into());
+                }
+                match &pb {
+                    Some(pb) => pb.suspend(|| retry_note(ctx, &e, poll)),
+                    None => retry_note(ctx, &e, poll),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(poll)).await;
+                continue;
+            }
+        };
+        failures = 0;
+        applied += rep.blocks_applied;
+        match &pb {
+            Some(pb) => {
+                pb.set_position(applied.min(total));
+                pb.set_message(ui::num(rep.to.unwrap_or(first)));
+                pb.suspend(|| render_pass(ctx, ar, &rep, layouts, addrs))?;
+            }
+            None => render_pass(ctx, ar, &rep, layouts, addrs)?,
+        }
+        if rep.blocks_applied == 0 || (rep.to.is_some() && rep.to >= rep.source_head) {
+            break;
+        }
+    }
+    if let Some(pb) = &pb {
+        pb.finish_and_clear();
+    }
+    Ok(())
 }
 
 /// Backfill `addrs` in one backward walk with a progress bar. Returns the
@@ -395,6 +455,10 @@ pub fn render_pass(
         return Ok(());
     };
     let many = addrs.len() > 1;
+    // Candidate mapping keys: every account the applied blocks touched
+    // (senders and recipients are in the BAL) plus the watched addresses.
+    let mut keys = crate::util::address_keys(&rep.touched);
+    keys.extend(crate::util::address_keys(addrs));
     let mut quiet: Option<(u64, u64)> = None;
     let flush = |q: &mut Option<(u64, u64)>| {
         if let Some((a, b)) = q.take() {
@@ -423,7 +487,7 @@ pub fn render_pass(
                     parts.push(ui::dim(format!("+{} more", slots.len() - 4)));
                     break;
                 }
-                parts.push(describe_change(ar, layout, *a, *slot, b));
+                parts.push(describe_change(ar, layout, *a, *slot, b, &keys));
             }
             let who = if many {
                 format!("{} ", ui::short_addr(a))
@@ -460,6 +524,7 @@ fn describe_change(
     a: Address,
     slot: B256,
     b: u64,
+    keys: &[B256],
 ) -> String {
     let now = ar.storage_at(a, slot, b).ok();
     let before = if b > 0 {
@@ -468,7 +533,7 @@ fn describe_change(
         None
     };
     let named = layout.and_then(|l| {
-        l.describe_slot(slot, 4096)
+        l.describe_slot_with_keys(slot, 4096, keys)
             .into_iter()
             .next()
             .map(|n| (l, n))

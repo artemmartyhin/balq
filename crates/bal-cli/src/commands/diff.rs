@@ -18,7 +18,14 @@ fn side_json(r: &Read, decoded: Option<String>) -> Value {
     }
 }
 
-pub fn run(ctx: &Ctx, address: Address, from: u64, to: u64, layout: Option<PathBuf>) -> Result<()> {
+pub fn run(
+    ctx: &Ctx,
+    address: Address,
+    from: u64,
+    to: u64,
+    layout: Option<PathBuf>,
+    keys: &[alloy_primitives::B256],
+) -> Result<()> {
     let ar = ctx.open()?;
     if to <= from {
         return Err(anyhow!("--to must be > --from"));
@@ -40,7 +47,7 @@ pub fn run(ctx: &Ctx, address: Address, from: u64, to: u64, layout: Option<PathB
         let after = ar.storage_at(address, s, to);
         let named = layout
             .as_ref()
-            .map(|l| (l, l.describe_slot(s, 4096)))
+            .map(|l| (l, l.describe_slot_with_keys(s, 4096, keys)))
             .filter(|(_, names)| !names.is_empty());
         let Some((l, names)) = named else {
             if ctx.json {

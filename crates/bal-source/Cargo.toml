@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 tokio.workspace = true
+alloy-consensus = { version = "2", default-features = false, features = ["std", "serde"] }
 bal-codec = { version = "0.2.0", path = "../bal-codec", features = ["json"] }
 alloy-primitives = { workspace = true, features = ["serde"] }
 async-trait.workspace = true

@@ -10,7 +10,9 @@
 //! Neither needs `eth_getProof`, so neither is bounded by the node's state
 //! window; the only bound is how far back the node still serves blocks.
 
-use crate::keys::{blockidx_key, decode_boot, encode_boot, encode_value, slot_key, slot_prefix};
+use crate::keys::{
+    blockidx_key, decode_boot, encode_boot, encode_slots, encode_value, slot_key, slot_prefix,
+};
 use crate::{
     anchor_key, creation_in, settle_created, Archive, ArchiveError, BootState, Provenance, Result,
     BLOCKIDX, BOOT, CREATED, META, PENDING, SLOTS, WATCH,
@@ -366,8 +368,10 @@ impl Archive {
                 let mut idx = txn.open_table(BLOCKIDX)?;
                 let mut boot = txn.open_table(BOOT)?;
                 let mut pending = txn.open_table(PENDING)?;
+                let mut changed = Vec::with_capacity(acc.storage_changes.len());
                 for sc in &acc.storage_changes {
                     let slot = sc.slot_b256();
+                    changed.push(slot);
                     if self.config.full_detail {
                         for ch in &sc.changes {
                             slots.insert(
@@ -384,7 +388,6 @@ impl Archive {
                         )?;
                         written += 1;
                     }
-                    idx.insert(blockidx_key(addr, block, slot).as_slice(), ())?;
                     // The slot's earliest known change is now this block; what
                     // is unknown moved below it.
                     let key = slot_prefix(addr, slot);
@@ -408,6 +411,12 @@ impl Archive {
                     if unresolved.remove(&slot) {
                         resolved += 1;
                     }
+                }
+                if !changed.is_empty() {
+                    idx.insert(
+                        blockidx_key(addr, block).as_slice(),
+                        encode_slots(&changed).as_slice(),
+                    )?;
                 }
                 if creation_in(acc) {
                     txn.open_table(CREATED)?.insert(addr.as_slice(), block)?;

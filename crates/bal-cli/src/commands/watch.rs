@@ -19,7 +19,7 @@ pub async fn watch(
             JsonRpcSource::new(&rpc).head().await? + 1
         }
     };
-    ctx.open()?.watch(address, from)?;
+    ctx.open_local()?.watch(address, from)?;
     if ctx.json {
         emit(&json!({ "watching": address, "from": from }));
     } else {
@@ -32,7 +32,7 @@ pub async fn watch(
 }
 
 pub fn unwatch(ctx: &Ctx, address: Address) -> Result<()> {
-    ctx.open()?.unwatch(address)?;
+    ctx.open_local()?.unwatch(address)?;
     if ctx.json {
         emit(&json!({ "unwatched": address }));
     } else {
@@ -46,20 +46,16 @@ pub fn status(ctx: &Ctx) -> Result<()> {
     let s = ar.stats()?;
     let created_at = |a: &Address| s.created.iter().find(|(c, _)| c == a).map(|(_, b)| *b);
     if ctx.json {
-        emit(&json!({
-            "data": ctx.data,
-            "head": s.head.map(|(n, h)| json!({ "number": n, "hash": h })),
-            "watch": s.watches.iter().map(|(a, f)| json!({
-                "address": a, "from": f, "createdAt": created_at(a),
-            })).collect::<Vec<_>>(),
-            "slotRecords": s.slot_records,
-            "bootstrap": { "done": s.slots_done, "pending": s.slots_pending, "lost": s.slots_lost },
-            "retainedHeaders": s.retained_headers,
-            "fileBytes": s.file_bytes,
-        }));
+        let mut out = crate::util::stats_json(&s);
+        out["data"] = json!(ctx.data);
+        out["via"] = json!(ar.via());
+        emit(&out);
         return Ok(());
     }
-    println!("data:     {}", ctx.data.display());
+    match ar.via() {
+        Some(url) => println!("data:     {}  (read via {url})", ctx.data.display()),
+        None => println!("data:     {}", ctx.data.display()),
+    }
     match s.head {
         Some((n, h)) => println!("head:     {n} ({h})"),
         None => println!("head:     (nothing synced yet)"),

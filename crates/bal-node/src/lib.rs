@@ -24,9 +24,8 @@ fn na(e: NotAvailable) -> Error {
         NotAvailable::AfterHead { .. } => "AfterHead",
         NotAvailable::NotSynced => "NotSynced",
         NotAvailable::InvalidRange { .. } => "InvalidRange",
-        NotAvailable::NotBootstrapped => "NotBootstrapped",
-        NotAvailable::BootstrapPending { .. } => "BootstrapPending",
-        NotAvailable::BootstrapLost { .. } => "BootstrapLost",
+        NotAvailable::NeverRecorded => "NeverRecorded",
+        NotAvailable::UnknownBefore { .. } => "UnknownBefore",
         NotAvailable::Internal(_) => "Internal",
     };
     Error::from_reason(format!("[NotAvailable:{code}] {e}"))
@@ -574,6 +573,8 @@ impl Layout {
                     ValueKind::Bool => "bool",
                     ValueKind::Address => "address",
                     ValueKind::Bytes => "bytes",
+                    ValueKind::DynBytes => "dynbytes",
+                    ValueKind::String => "string",
                     ValueKind::Raw => "raw",
                 }
             ),
@@ -595,6 +596,8 @@ impl Layout {
                 ValueKind::Bool => "bool",
                 ValueKind::Address => "address",
                 ValueKind::Bytes => "bytes",
+                ValueKind::DynBytes => "dynbytes",
+                ValueKind::String => "string",
                 ValueKind::Raw => "raw",
             }
             .into(),
@@ -607,13 +610,83 @@ impl Layout {
     pub fn typescript(&self, name: String) -> String {
         self.inner.typescript(&name)
     }
+
+    /// For a dynamic `bytes`/`string` whose slot holds `wordHex`: the extra
+    /// slots holding the data (empty for short values). Read them at the
+    /// same block and pass them to `decodeBytes`.
+    #[napi]
+    pub fn bytes_data_slots(&self, location: Location, word_hex: String) -> Result<Vec<String>> {
+        Ok(self
+            .inner
+            .bytes_data_slots(&loc_in(location)?, word(&word_hex)?)
+            .into_iter()
+            .map(hex32)
+            .collect())
+    }
+
+    /// Assemble a dynamic `bytes`/`string` from its slot word and data words.
+    #[napi]
+    pub fn decode_bytes(
+        &self,
+        location: Location,
+        word_hex: String,
+        chunks: Vec<String>,
+    ) -> Result<DecodedValue> {
+        use bal_layout::{Value, ValueKind};
+        let loc = loc_in(location)?;
+        let chunks = chunks.iter().map(|c| word(c)).collect::<Result<Vec<_>>>()?;
+        let v = self.inner.decode_bytes(&loc, word(&word_hex)?, &chunks);
+        let k = match &v {
+            Value::Str(_) => ValueKind::String,
+            Value::Bytes(_) => ValueKind::DynBytes,
+            _ => ValueKind::Raw,
+        };
+        Ok(DecodedValue {
+            kind: match k {
+                ValueKind::String => "string",
+                ValueKind::DynBytes => "dynbytes",
+                _ => "raw",
+            }
+            .into(),
+            text: v.to_string(),
+        })
+    }
+
+    /// `describeSlot` plus mapping entries whose key is one of `keys`
+    /// (addresses or 0x words / decimals).
+    #[napi]
+    pub fn describe_slot_with_keys(
+        &self,
+        slot: String,
+        keys: Vec<String>,
+    ) -> Result<Vec<NamedLocation>> {
+        let keys = keys
+            .iter()
+            .map(|k| {
+                if k.len() == 42 && k.starts_with("0x") {
+                    addr(k).map(|a| B256::left_padding_from(a.as_slice()))
+                } else {
+                    word(k)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self
+            .inner
+            .describe_slot_with_keys(word(&slot)?, 4096, &keys)
+            .into_iter()
+            .map(|(name, l)| NamedLocation {
+                name,
+                location: loc_out(l),
+            })
+            .collect())
+    }
 }
 
 /// A decoded word with its kind.
 #[napi(object)]
 pub struct DecodedValue {
-    /// "uint" | "int" | "bool" | "address" | "bytes" | "raw"
+    /// "uint" | "int" | "bool" | "address" | "bytes" | "dynbytes" | "string" | "raw"
     pub kind: String,
-    /// Decimal for integers, "true"/"false", 0x-hex for addresses/bytes/raw.
+    /// Decimal for integers, "true"/"false", the text of a string, 0x-hex otherwise.
     pub text: String,
 }

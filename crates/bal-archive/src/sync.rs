@@ -46,7 +46,14 @@ pub struct SyncReport {
     /// The source's head when the pass started; `to == source_head` means
     /// the archive caught up.
     pub source_head: Option<u64>,
+    /// Every account that appeared in an applied block's BAL, deduplicated
+    /// and capped at [`TOUCHED_CAP`]. Useful as candidate mapping keys when
+    /// naming what changed (senders and recipients are in the BAL).
+    pub touched: Vec<Address>,
 }
+
+/// Bound on [`SyncReport::touched`]; beyond it the list stops growing.
+pub const TOUCHED_CAP: usize = 4096;
 
 /// Releases the sync slot when the pass ends — by return, error, or the
 /// future being dropped.
@@ -140,6 +147,7 @@ impl Archive {
         // Guards against a source that keeps contradicting itself about the
         // same parent link (pooled upstreams on different forks).
         let mut last_fork: Option<u64> = None;
+        let mut touched: std::collections::BTreeSet<Address> = std::collections::BTreeSet::new();
 
         // Blocks are fetched FETCH_AHEAD at a time and applied in order; a
         // reorg discards what was prefetched past the fork.
@@ -217,6 +225,9 @@ impl Archive {
             let watches = self.watchlist_for(next)?;
             let prune_below =
                 Some(finalized.min(src_head.saturating_sub(self.config.bootstrap_window + 1)));
+            if touched.len() < TOUCHED_CAP {
+                touched.extend(blk.bal.accounts.iter().map(|a| a.address));
+            }
             let (fresh, written) =
                 self.apply_block(&header, &blk.bal, &watches, verified, prune_below)?;
             report.slots_written += written;
@@ -264,6 +275,7 @@ impl Archive {
             report.bootstrap_lost = lost;
         }
 
+        report.touched = touched.into_iter().take(TOUCHED_CAP).collect();
         info!(?report, "sync done");
         Ok(report)
     }

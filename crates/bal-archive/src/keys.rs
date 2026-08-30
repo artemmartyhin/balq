@@ -2,8 +2,8 @@
 //! `SCHEMA_VERSION`, and never write a migration in a hurry.
 //!
 //! ```text
-//! SLOTS     addr(20) || slot(32) || block(8, BE) || index(4, BE)  ->  tag(1) || value(32)
-//! BLOCKIDX  addr(20) || block(8, BE) || slot(32)                  ->  ()
+//! SLOTS     addr(20) || slot(32) || block(8, BE) || index(4, BE)  ->  tag(1) || value (minimal big-endian, 0..=32 bytes)
+//! BLOCKIDX  addr(20) || block(8, BE)                              ->  slot(32) || slot(32) || ...  (every slot written in that block)
 //! BOOT      addr(20) || slot(32)                                  ->  state(1) || first_seen(8, BE)
 //! ```
 //!
@@ -16,12 +16,21 @@ use bal_codec::BlockAccessIndex;
 
 /// Key/value layout version written into `meta:schema_version`. Bump when
 /// any byte layout in this module changes.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
+
+/// Oldest on-disk version this build upgrades in place.
+/// - v1 -> v2: tables v2 adds (`created`) and states it writes (`Done` without
+///   a proof record, settled by creation); v1 data is valid v2 data.
+/// - v2 -> v3: the block index is regrouped (one entry per address and block
+///   instead of one per slot) and values are stored minimal; v2 values still
+///   decode, the index is rewritten on open.
+pub const OLDEST_UPGRADABLE: u32 = 1;
 
 pub const SLOT_KEY_LEN: usize = 20 + 32 + 8 + 4;
 pub const SLOT_PREFIX_LEN: usize = 20 + 32;
-pub const BLOCKIDX_KEY_LEN: usize = 20 + 8 + 32;
-pub const BLOCKIDX_PREFIX_LEN: usize = 20 + 8;
+pub const BLOCKIDX_KEY_LEN: usize = 20 + 8;
+/// v1/v2 block-index key: addr || block || slot, one per slot.
+pub const LEGACY_BLOCKIDX_KEY_LEN: usize = 20 + 8 + 32;
 
 /// Where a stored value came from. Stored as the first byte of every value so
 /// provenance can never drift from the data.
@@ -90,23 +99,26 @@ pub fn parse_slot_key(k: &[u8]) -> Option<(Address, B256, u64, BlockAccessIndex)
     ))
 }
 
-pub fn blockidx_key(addr: Address, block: u64, slot: B256) -> [u8; BLOCKIDX_KEY_LEN] {
+pub fn blockidx_key(addr: Address, block: u64) -> [u8; BLOCKIDX_KEY_LEN] {
     let mut k = [0u8; BLOCKIDX_KEY_LEN];
-    k[..20].copy_from_slice(addr.as_slice());
-    k[20..28].copy_from_slice(&block.to_be_bytes());
-    k[28..].copy_from_slice(slot.as_slice());
-    k
-}
-
-pub fn blockidx_prefix(addr: Address, block: u64) -> [u8; BLOCKIDX_PREFIX_LEN] {
-    let mut k = [0u8; BLOCKIDX_PREFIX_LEN];
     k[..20].copy_from_slice(addr.as_slice());
     k[20..].copy_from_slice(&block.to_be_bytes());
     k
 }
 
-pub fn parse_blockidx_key(k: &[u8]) -> Option<(Address, u64, B256)> {
+pub fn parse_blockidx_key(k: &[u8]) -> Option<(Address, u64)> {
     if k.len() != BLOCKIDX_KEY_LEN {
+        return None;
+    }
+    Some((
+        Address::from_slice(&k[..20]),
+        u64::from_be_bytes(k[20..28].try_into().ok()?),
+    ))
+}
+
+/// v1/v2 key -> (addr, block, slot), for the on-open migration.
+pub fn parse_legacy_blockidx_key(k: &[u8]) -> Option<(Address, u64, B256)> {
+    if k.len() != LEGACY_BLOCKIDX_KEY_LEN {
         return None;
     }
     Some((
@@ -116,18 +128,42 @@ pub fn parse_blockidx_key(k: &[u8]) -> Option<(Address, u64, B256)> {
     ))
 }
 
-pub fn encode_value(p: Provenance, v: B256) -> [u8; 33] {
-    let mut out = [0u8; 33];
-    out[0] = p as u8;
-    out[1..].copy_from_slice(v.as_slice());
+/// The block index value: the written slots, concatenated.
+pub fn encode_slots(slots: &[B256]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(slots.len() * 32);
+    for s in slots {
+        out.extend_from_slice(s.as_slice());
+    }
     out
 }
 
-pub fn decode_value(v: &[u8]) -> Option<(Provenance, B256)> {
-    if v.len() != 33 {
+pub fn decode_slots(v: &[u8]) -> Option<Vec<B256>> {
+    if !v.len().is_multiple_of(32) {
         return None;
     }
-    Some((Provenance::from_byte(v[0])?, B256::from_slice(&v[1..])))
+    Some(v.as_chunks::<32>().0.iter().map(B256::from).collect())
+}
+
+/// tag || value with leading zero bytes stripped: a counter costs 1 byte,
+/// an address 20, a full hash 32. Zero is the tag alone.
+pub fn encode_value(p: Provenance, v: B256) -> Vec<u8> {
+    let first = v.iter().position(|b| *b != 0).unwrap_or(32);
+    let mut out = Vec::with_capacity(1 + 32 - first);
+    out.push(p as u8);
+    out.extend_from_slice(&v[first..]);
+    out
+}
+
+/// Accepts both the minimal form and the v1/v2 fixed 33-byte form (a 32-byte
+/// minimal value is byte-identical to it).
+pub fn decode_value(v: &[u8]) -> Option<(Provenance, B256)> {
+    if v.is_empty() || v.len() > 33 {
+        return None;
+    }
+    let mut word = [0u8; 32];
+    let body = &v[1..];
+    word[32 - body.len()..].copy_from_slice(body);
+    Some((Provenance::from_byte(v[0])?, B256::from(word)))
 }
 
 /// Bootstrap bookkeeping per (addr, slot).
@@ -215,6 +251,17 @@ mod tests {
             decode_value(&encode_value(Provenance::Proof, v)),
             Some((Provenance::Proof, v))
         );
+        // Minimal encoding: small numbers are short, zero is the tag alone,
+        // and the old fixed form still decodes.
+        let one = B256::from(alloy_primitives::U256::from(1u8).to_be_bytes::<32>());
+        assert_eq!(encode_value(Provenance::Bal, one), vec![0, 1]);
+        assert_eq!(encode_value(Provenance::Bal, B256::ZERO), vec![0]);
+        assert_eq!(decode_value(&[0, 1]), Some((Provenance::Bal, one)));
+        let mut fixed = vec![1u8];
+        fixed.extend_from_slice(v.as_slice());
+        assert_eq!(decode_value(&fixed), Some((Provenance::Proof, v)));
+        assert_eq!(decode_slots(&encode_slots(&[v, one])), Some(vec![v, one]));
+        assert_eq!(decode_slots(&[1, 2, 3]), None);
         assert_eq!(
             decode_boot(&encode_boot(BootState::Pending { first_seen: 5 })),
             Some(BootState::Pending { first_seen: 5 })

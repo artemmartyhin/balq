@@ -10,9 +10,8 @@ export class NotAvailableError extends Error {
     | "AfterHead"
     | "NotSynced"
     | "InvalidRange"
-    | "NotBootstrapped"
-    | "BootstrapPending"
-    | "BootstrapLost"
+    | "NeverRecorded"
+    | "UnknownBefore"
     | "Internal";
 }
 

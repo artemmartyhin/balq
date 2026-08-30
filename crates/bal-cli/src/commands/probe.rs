@@ -103,9 +103,8 @@ pub async fn run(ctx: &Ctx, rpc: Option<String>, age: u64) -> Result<()> {
     match &r.proof_window {
         Ok(0) => {
             println!("eth_getProof    window 0 — proofs only at head.");
-            println!("                Early bootstrap (pre-value of a slot at its first change) is IMPOSSIBLE here:");
-            println!("                such slots become BootstrapLost; history is complete from each slot's first change.");
-            println!("                Own reth node: run with --rpc.eth-proof-window 128 (or more), or pass --backup-rpc.");
+            println!("                Only `sync --prove` (the optional eth_getProof shortcut) is affected;");
+            println!("                `index` and `backfill` read earlier values from older blocks and never need proofs.");
         }
         Ok(w) => println!("eth_getProof    window {w} blocks — pass `sync --proof-window {w}`"),
         Err(e) => println!("eth_getProof    NOT served — no bootstrap at all: {e}"),

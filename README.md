@@ -192,8 +192,8 @@ try { ar.view(proxy, layout).at(1).counter } catch (e) { e.code }          // "B
 |---|---|
 | `BeforeStart` | before the history starts — `backfill --to N` extends it |
 | `AfterHead` | sync has not reached that block yet |
-| `NotBootstrapped` | the slot never changed since the start and the creation was not seen — `backfill` to the deploy |
-| `BootstrapPending` / `BootstrapLost` | the slot's earliest recorded write is at N, nothing known before it — `backfill --resolve` |
+| `NeverRecorded` | the slot never changed since the start and the creation was not seen — `backfill` to the deploy |
+| `UnknownBefore` | the slot's earliest recorded write is at N, nothing known before it — `backfill --resolve` |
 
 None of these happen for a contract watched from (or backfilled to) its
 deploy: creation seen means every value is known.

@@ -44,6 +44,17 @@ pub enum SourceError {
     /// A response did not have the expected shape.
     #[error("malformed response: {0}")]
     Malformed(String),
+    /// A response body exceeded the size cap. Not retried: the node would
+    /// send the same body again.
+    #[error("{method}: response of {bytes} bytes exceeds the {limit}-byte limit")]
+    TooLarge {
+        /// JSON-RPC method.
+        method: String,
+        /// Announced or accumulated size.
+        bytes: u64,
+        /// The cap.
+        limit: u64,
+    },
     /// The BAL failed to decode or validate.
     #[error("codec: {0}")]
     Codec(#[from] bal_codec::CodecError),

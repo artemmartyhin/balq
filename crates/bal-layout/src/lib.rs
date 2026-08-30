@@ -61,6 +61,8 @@ pub type Result<T> = std::result::Result<T, LayoutError>;
 /// a self-referential type in a crafted file would otherwise recurse forever.
 const MAX_NESTING: usize = 32;
 
+mod ext;
+
 /// One variable (or struct member) as solc reports it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,6 +158,10 @@ pub enum Value {
     Address(Address),
     /// `bytesN`.
     FixedBytes(Vec<u8>),
+    /// Dynamic `bytes`, assembled from its data slots.
+    Bytes(Vec<u8>),
+    /// Dynamic `string`, assembled from its data slots.
+    Str(String),
     /// Not decodable from a single word with this type; the full word.
     Raw(B256),
 }
@@ -167,7 +173,10 @@ impl std::fmt::Display for Value {
             Value::Int(i) => write!(f, "{i}"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Address(a) => write!(f, "{a}"),
-            Value::FixedBytes(b) => write!(f, "0x{}", alloy_primitives::hex::encode(b)),
+            Value::FixedBytes(b) | Value::Bytes(b) => {
+                write!(f, "0x{}", alloy_primitives::hex::encode(b))
+            }
+            Value::Str(s) => write!(f, "{s}"),
             Value::Raw(w) => write!(f, "{w}"),
         }
     }
@@ -186,6 +195,11 @@ pub enum ValueKind {
     Address,
     /// `bytesN`; `0x` hex.
     Bytes,
+    /// Dynamic `bytes`: the slot word gives the length, the data may live
+    /// in further slots ([`Layout::bytes_data_slots`]); `0x` hex.
+    DynBytes,
+    /// Dynamic `string`, same layout as `DynBytes`; text.
+    String,
     /// Not decodable from one word; the whole word as `0x` hex.
     Raw,
 }
@@ -311,9 +325,17 @@ impl Layout {
         })
     }
 
-    /// [`Layout::from_json`] on the contents of `path`.
+    /// [`Layout::from_json`] on the contents of `path`; a file with a
+    /// `namespaces` list is a manifest ([`Layout::from_manifest`]).
     pub fn from_artifact(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_json(&std::fs::read_to_string(path)?)
+        let text = std::fs::read_to_string(path.as_ref())?;
+        if serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .is_some_and(|v| v.get("namespaces").is_some())
+        {
+            return Self::from_manifest(path);
+        }
+        Self::from_json(&text)
     }
 
     /// Top-level variables in declaration order.
@@ -495,7 +517,11 @@ impl Layout {
             (Encoding::DynamicArray, _, _) => PathKind::Array,
             (Encoding::Inplace, true, _) => PathKind::Struct,
             (Encoding::Inplace, false, true) => PathKind::FixedArray,
-            (Encoding::Bytes, _, _) => PathKind::Value(ValueKind::Raw),
+            (Encoding::Bytes, _, _) => PathKind::Value(if t.label.starts_with("string") {
+                ValueKind::String
+            } else {
+                ValueKind::DynBytes
+            }),
             (Encoding::Inplace, false, false) => PathKind::Value(value_kind(&t.label)),
         })
     }
@@ -510,6 +536,8 @@ impl Layout {
             Value::Bool(_) => ValueKind::Bool,
             Value::Address(_) => ValueKind::Address,
             Value::FixedBytes(_) => ValueKind::Bytes,
+            Value::Bytes(_) => ValueKind::DynBytes,
+            Value::Str(_) => ValueKind::String,
             Value::Raw(_) => ValueKind::Raw,
         };
         (k, v)
@@ -582,7 +610,11 @@ impl Layout {
             (Encoding::Inplace, None, None) => match value_kind(&t.label) {
                 ValueKind::Uint | ValueKind::Int => "bigint".into(),
                 ValueKind::Bool => "boolean".into(),
-                ValueKind::Address | ValueKind::Bytes | ValueKind::Raw => "string".into(),
+                ValueKind::Address
+                | ValueKind::Bytes
+                | ValueKind::DynBytes
+                | ValueKind::String
+                | ValueKind::Raw => "string".into(),
             },
         }
     }

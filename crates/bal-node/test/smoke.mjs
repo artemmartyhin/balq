@@ -39,7 +39,7 @@ for (const [args, code] of [
   [["0x000000000000000000000000000000000000dEaD", "0", head.number], "NotWatched"],
   [[proxy, "0", deploy.block], "BeforeStart"],
   [[proxy, "0", head.number + 1000], "AfterHead"],
-  [[proxy, "0x1234", head.number], "NotBootstrapped"],
+  [[proxy, "0x1234", head.number], "NeverRecorded"],
 ]) {
   let got = "no error";
   try { ar.storageAt(...args); } catch (e) { got = e instanceof NotAvailableError ? e.code : `other: ${e.message}`; }

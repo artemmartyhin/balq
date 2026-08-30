@@ -333,3 +333,57 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod error_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::SourceError;
+
+    struct Down;
+
+    #[async_trait]
+    impl BalSource for Down {
+        async fn head(&self) -> Result<u64> {
+            Err(SourceError::Transport("primary down".into()))
+        }
+        async fn finalized(&self) -> Result<u64> {
+            Err(SourceError::Transport("primary down".into()))
+        }
+        async fn block(&self, n: u64) -> Result<SourcedBlock> {
+            Err(SourceError::NoBal(n))
+        }
+        async fn header(&self, n: u64) -> Result<Header> {
+            Ok(Header {
+                number: n,
+                hash: B256::ZERO,
+                parent_hash: B256::ZERO,
+                state_root: B256::ZERO,
+                timestamp: 0,
+                block_access_list_hash: None,
+            })
+        }
+        async fn bal(&self, n: u64) -> Result<BlockAccessList> {
+            Err(SourceError::NoBal(n))
+        }
+    }
+
+    /// Without a backup the primary's own error is what the caller sees —
+    /// "no backup configured" is not the news.
+    #[tokio::test]
+    async fn no_backup_reports_the_primary_error() {
+        let src: Fallback<Down, Option<Down>> = Fallback::new(Down, None);
+        let e = src.bal(7).await.unwrap_err();
+        assert!(matches!(e, SourceError::NoBal(7)), "{e}");
+        let e = src.block(7).await.unwrap_err();
+        assert!(matches!(e, SourceError::NoBal(7)), "{e}");
+    }
+
+    /// With a backup that also fails, both errors are reported.
+    #[tokio::test]
+    async fn both_failing_reports_both() {
+        let src = Fallback::new(Down, Down);
+        let e = src.bal(7).await.unwrap_err().to_string();
+        assert!(e.contains("primary:") && e.contains("backup:"), "{e}");
+    }
+}
