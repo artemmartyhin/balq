@@ -27,7 +27,8 @@
   "scripts": {
     "build": "napi build --release --platform",
     "build:debug": "napi build --platform",
-    "test": "node test/smoke.mjs"
+    "test": "node test/check-loader.mjs && node test/smoke.mjs",
+    "prepack": "node test/check-loader.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3"
