@@ -6,6 +6,11 @@ updates:
     groups:
       alloy: { patterns: ["alloy-*"] }
       minor-and-patch: { update-types: ["minor", "patch"] }
+    # Major bumps (redb 2 → 4, toml 0.9 → 1) change APIs and the on-disk
+    # format; they are done by hand, not by a bot.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: npm
     directory: /crates/bal-node
     schedule: { interval: weekly }

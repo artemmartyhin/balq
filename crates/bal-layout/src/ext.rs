@@ -10,7 +10,8 @@ use crate::{Encoding, Layout, LayoutError, Location, Result, StorageEntry, TypeI
 use alloy_primitives::{keccak256, Address, B256, U256};
 use std::path::Path;
 
-/// A layout manifest: a base layout plus namespaces mounted into it.
+/// A layout manifest: a base layout plus namespaces mounted into it. The
+/// format, which [`Layout::from_manifest`] and [`Layout::from_artifact`] read:
 ///
 /// ```json
 /// {
@@ -102,7 +103,8 @@ impl Layout {
         Ok(())
     }
 
-    /// Build from a manifest file (see [`Manifest`]).
+    /// Build from a manifest file: `{ "base": "...", "namespaces": [{ "prefix",
+    /// "layout", "erc7201" | "slot" }] }` — see the module docs for the format.
     pub fn from_manifest(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)?;
