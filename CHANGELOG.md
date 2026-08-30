@@ -68,6 +68,7 @@ Security release after an independent review (`docs/SECURITY-AUDIT.md`).
   dev-dependency (a binary download on every `npm ci`) is gone.
 
 ### Added (unreleased)
+- `@balq/node` 0.1.2: package README leads with `view` and `typegen`; the string-path API is documented as the low-level layer. No code change.
 - `--json` on every command (one document; `--follow` streams one per pass);
   misses are `{ "error": { "code", "message" } }` with exit code 2.
 - `balq.toml` (`rpc`, `backup_rpc`, `proof_window`, `data`); flags win.

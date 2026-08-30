@@ -1,80 +1,111 @@
 # @balq/node
 
-Node.js bindings for [balq](../../README.md): a local, verified archive of
-contract storage built from EIP-7928 Block-Level Access Lists. In-process
-(napi-rs), no HTTP hop; reads stay available while `sync()` runs.
+Local, verified history of a contract's storage — read by variable name,
+at any block, from an ordinary full node. Node.js bindings for
+[balq](https://github.com/artemmartyhin/balq) (EIP-7928 Block-Level Access
+Lists, Glamsterdam). In-process, no HTTP hop; reads keep working while
+`sync()` runs.
+
+```
+npm i @balq/node        # prebuilt: win32-x64 · linux-x64 · linux-arm64 · darwin-x64 · darwin-arm64
+```
+
+## Read storage like the contract itself
 
 ```js
 const { Archive, Layout, NotAvailableError } = require("@balq/node");
 
 const ar = Archive.open("./balq.redb", { proofWindow: 0 });
-ar.watch("0x3582…53ce", 114563);            // from >= head + 1
-await ar.sync("http://localhost:8545");     // fetch → verify → apply; returns a SyncReport
+ar.watch(proxy, 114563);                 // start following (must be above the current head)
+await ar.sync("http://localhost:8545");  // fetch → verify keccak(rlp(bal)) against the header → apply
 
-const v = ar.storageAt("0x3582…53ce", "0", 114591);
-// { value: "0x…0c", provenance: "bal", setAt: 114590, index: 125 }
-
-const layout = Layout.fromFile("./out/Playground.sol/Playground.json"); // forge artifact or bare storageLayout
-const loc = layout.locate("balances[0x61Cc…ca80]");
-layout.decode(loc, ar.storageAt("0x3582…53ce", loc.slot, 114591).value); // "37585"
-
-try {
-  ar.storageAt("0x3582…53ce", "0", 114500);
-} catch (e) {
-  if (e instanceof NotAvailableError) console.log(e.code); // "BeforeStart" — never null
-}
-```
-
-Every miss is a `NotAvailableError` with `code` ∈ `NotWatched | BeforeStart |
-AfterHead | NotSynced | NotBootstrapped | BootstrapPending | BootstrapLost |
-Internal`. Numbers are JS numbers (block heights fit); words, slots and
-addresses are 0x-hex strings.
-
-## API
-
-| | |
-|---|---|
-| `Archive.open(path, {proofWindow?, fullDetail?, allowUnverified?})` | open or create |
-| `watch(addr, fromBlock)` / `unwatch(addr)` / `watchlist()` / `head()` | watchlist and head |
-| `sync(rpcUrl, bootstrap = true, backupRpc?): Promise<SyncReport>` | one pass to the node's head; `backupRpc` (any archive provider) is asked only when `rpcUrl` lacks a BAL or cannot prove a slot, and is verified the same way |
-| `storageAt(addr, slot, block): StorageValue` | one ordered seek |
-| `history(addr, slot, from, to): HistoryEntry[]` | changes in `[from, to)` |
-| `changedSlots(addr, block): string[]` | from the block index |
-| `bootstrapSlot(rpcUrl, addr, slot, backupRpc?): Promise<void>` | prove a never-changed slot at head |
-| `Layout.fromFile(path)` / `Layout.fromJson(s)` | solc storageLayout |
-| `locate(path)` / `decode(loc, word)` / `describeSlot(slot)` / `fields()` | names ↔ slots |
-
-## Build locally
-
-```
-npm ci
-npx napi build --platform          # needs Node >= 20.12 for the CLI; the module itself runs on >= 18
-node test/smoke.mjs                # against ../../testbed/balq.redb
-```
-
-Zero logic lives in this crate — see `src/lib.rs`: argument conversion,
-one call into `bal-archive` / `bal-layout`, result conversion.
-
-## Reading by name: `view`
-
-```js
-const view = ar.view(proxy, layout).at(114591);   // storage as of the end of block 114591
+const layout = Layout.fromFile("./out/Playground.sol/Playground.json");   // solc storageLayout / forge artifact
+const view = ar.view(proxy, layout).at(114591);                          // storage as of block 114591
 
 view.counter            // 12n
-view.balances[addr]     // 37585n
-view.nested[addr][7]    // 0x… (raw word if the layout cannot decode it)
+view.balances[user]     // 37585n   — mapping by key
 view.totals.index       // 5000000000000000146n
 view.items[3]           // …
 view.items.length       // 8n
 view.c                  // true
 view.lastPoker          // "0x61Cc…"
+view.nested[user][7n]   // nested mappings
 ```
 
-Integers are `bigint`, bools `boolean`, addresses / bytes / undecodable
-words `string`. A missing value throws `NotAvailableError` (never
-`undefined`); an unknown field throws at access time.
+Integers are `bigint` (a `number` would silently lose precision), bools
+`boolean`, addresses/bytes/undecodable words `string`. `private` variables
+read the same as `public` ones — this is storage, not getters.
 
-Types: `balq typegen out/Playground.sol/Playground.json > Playground.d.ts`
-(or `layout.typescript("PlaygroundView")`), then
-`ar.view(proxy, layout).at<PlaygroundView>(block)` — misspelled fields
-fail at compile time.
+A missing value **throws**, never returns `undefined`:
+
+```js
+try {
+  ar.view(proxy, layout).at(100).counter;
+} catch (e) {
+  if (e instanceof NotAvailableError) console.log(e.code);   // "BeforeStart"
+}
+```
+
+`code` ∈ `NotWatched · BeforeStart · AfterHead · NotSynced · InvalidRange ·
+NotBootstrapped · BootstrapPending · BootstrapLost · Internal`.
+
+## Types: `typegen`
+
+```
+npx balq typegen out/Playground.sol/Playground.json --name PlaygroundView > Playground.d.ts
+```
+
+or from code: `layout.typescript("PlaygroundView")`. Then
+
+```ts
+const view = ar.view(proxy, layout).at<PlaygroundView>(114591);
+view.balances[user];   // bigint
+view.balanses;         // compile error
+```
+
+The generated interface mirrors the layout: `bigint` for integers, nested
+objects for structs, index signatures for mappings and arrays.
+
+## Sync
+
+```js
+await ar.sync(rpcUrl);                       // one pass to the node's head
+await ar.sync(rpcUrl, true, backupRpc);      // + an archive endpoint for what the primary cannot serve
+setInterval(() => ar.sync(rpcUrl).catch(console.error), 4000);   // follow mode
+```
+
+`sync` returns `{ blocksApplied, slotsWritten, bootstrapped, bootstrapPending,
+bootstrapLost, reorgedTo, … }`. Reads are safe during a sync; a second
+concurrent `sync` is refused with an error. The optional `backupRpc` (any
+archive provider) is asked only for BAL bodies and proofs the primary
+cannot serve, and is verified the same way — it adds reach, not trust.
+
+## Lower level
+
+| | |
+|---|---|
+| `Archive.open(path, { proofWindow?, fullDetail?, allowUnverified? })` | open or create |
+| `watch(addr, fromBlock)` / `unwatch(addr)` / `watchlist()` / `head()` | watchlist and head |
+| `storageAt(addr, slot, block): { value, provenance, setAt, index }` | one raw slot, one ordered seek |
+| `history(addr, slot, from, to)` | every change in `[from, to)` |
+| `changedSlots(addr, block)` | from the block index |
+| `bootstrapSlot(rpcUrl, addr, slot, backupRpc?)` | prove a never-changed slot at the head |
+| `layout.locate(path)` / `decode(loc, word)` / `describeSlot(slot)` / `kindOf(path)` | what `view` is built on |
+
+`provenance` is `"bal"` (verified against the header's BAL hash),
+`"proof"` (Merkle proof against `state_root`), or, only if you opted in,
+`"unverified"` / `"imported"`.
+
+## What to know
+
+- **Forward-only.** History starts at `watch`; nothing before it.
+- **Proof window.** Public gateways serve `eth_getProof` only at the head;
+  then the value *before* a slot's first change is `BootstrapLost` unless
+  you pass a `backupRpc` or run your own node with `--rpc.eth-proof-window`.
+  Post-values are never affected.
+- **Mappings** cannot be enumerated (keccak is one-way): `balances[user]`
+  works, "list all holders" does not.
+- **Proxies.** Watch the proxy; the layout is the implementation's.
+
+Docs, design notes, benchmarks and the security audit:
+[github.com/artemmartyhin/balq](https://github.com/artemmartyhin/balq).

@@ -1,6 +1,6 @@
 {
   "name": "@balq/node",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local, verified archive of contract storage built from EIP-7928 BALs — Node.js bindings",
   "main": "lib.js",
   "types": "lib.d.ts",
