@@ -17,10 +17,10 @@ name = "balq"
 path = "src/main.rs"
 
 [dependencies]
-bal-codec = { version = "0.3.0", path = "../bal-codec" }
-bal-source = { version = "0.3.0", path = "../bal-source" }
-bal-archive = { version = "0.3.0", path = "../bal-archive" }
-bal-layout = { version = "0.3.0", path = "../bal-layout" }
+bal-codec = { version = "0.4.0", path = "../bal-codec" }
+bal-source = { version = "0.4.0", path = "../bal-source" }
+bal-archive = { version = "0.4.0", path = "../bal-archive" }
+bal-layout = { version = "0.4.0", path = "../bal-layout" }
 alloy-primitives.workspace = true
 clap.workspace = true
 clap_complete = "4"

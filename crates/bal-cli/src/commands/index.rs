@@ -76,7 +76,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     if addrs.is_empty() {
         bail!("nothing to index: pass an address, or set `watch = [\"0x…\"]` in balq.toml");
     }
-    let layouts = Layouts::load(&ctx.cfg, &o.layout)?;
+    let layouts = std::sync::Arc::new(Layouts::load(&ctx.cfg, &o.layout)?);
 
     let info = JsonRpcSource::new(&rpc);
     let src = Fallback::new(JsonRpcSource::new(&rpc), backup.map(JsonRpcSource::new));
@@ -84,7 +84,7 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     let ar = std::sync::Arc::new(ctx.open_local()?);
     let _served = match &o.serve {
         Some(listen) => {
-            let (url, guard) = crate::serve::start(ar.clone(), &ctx.data, listen)?;
+            let (url, guard) = crate::serve::start(ar.clone(), layouts.clone(), &ctx.data, listen)?;
             if ctx.json {
                 emit(&json!({ "serving": url }));
             } else {
@@ -129,9 +129,28 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
         );
         if !layouts.is_empty() {
             let named = addrs.iter().filter(|a| layouts.get(a).is_some()).count();
+            let getters: usize = addrs
+                .iter()
+                .filter_map(|a| layouts.contract(a))
+                .map(|c| c.getters.len())
+                .sum();
+            let files: std::collections::BTreeSet<String> = addrs
+                .iter()
+                .filter_map(|a| layouts.contract(a))
+                .map(|c| {
+                    c.source
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                })
+                .collect();
             ui::kv(
                 "layouts",
-                format!("{named} of {} address(es) read by field name", addrs.len()),
+                format!(
+                    "{named} of {} address(es) read by field name · {getters} getter(s) answerable via eth_call {}",
+                    addrs.len(),
+                    ui::dim(files.into_iter().collect::<Vec<_>>().join(", "))
+                ),
             );
         }
         println!();

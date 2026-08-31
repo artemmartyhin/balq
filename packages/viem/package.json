@@ -1,0 +1,40 @@
+{
+  "name": "@balq/viem",
+  "version": "0.4.0",
+  "description": "viem transport that reads your contracts' storage from a local balq archive (EIP-7928 Block Access Lists) and falls back to your RPC for everything else",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "viem": "^2.0.0"
+  },
+  "devDependencies": {
+    "viem": "^2.0.0"
+  },
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "repository": "github:artemmartyhin/balq",
+  "homepage": "https://github.com/artemmartyhin/balq",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "ethereum",
+    "viem",
+    "transport",
+    "storage",
+    "archive",
+    "eip-7928",
+    "block-access-list"
+  ]
+}

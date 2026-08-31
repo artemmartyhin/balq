@@ -94,6 +94,12 @@ concurrent one is refused with an error. `sync(rpc, true)` additionally
 proves newly seen slots' earlier values with `eth_getProof` while the
 node's state window allows — an optional shortcut, nothing more.
 
+## From viem without this package
+
+If your code already reads through a viem client, `@balq/viem` makes
+`readContract` / `getStorageAt` come from a running `balq index --serve`
+instead of an archive RPC — no code change beyond the transport.
+
 ## Lower level
 
 | | |

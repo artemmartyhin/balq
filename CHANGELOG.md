@@ -5,7 +5,27 @@ All notable changes to this project are documented here. The format follows
 [SemVer](https://semver.org/). Until 1.0, minor versions may break the API
 and the on-disk schema (`SCHEMA_VERSION`).
 
-## [0.3.0] — 2026-08-30
+## [0.4.0] — 2026-08-31
+
+### Added
+- **`balq index --serve` speaks JSON-RPC 2.0** (`POST /`, batch): `eth_blockNumber`,
+  `eth_getStorageAt`, `eth_call`, `balq_getField`, `balq_status`. Misses are
+  `-32000` with `data.code` (`NotWatched`, `AfterHead`, `BeforeStart`,
+  `NeverRecorded`, `UnknownBefore`); anything balq does not serve is `-32601`.
+- **`eth_call` on public-variable getters** answered from the archive:
+  `bal_layout::Getters` reads the artifact's ABI, `Layout::resolve_call`
+  matches a selector to a variable by the compiler's rule (name, one input
+  per mapping key / array index, outputs = the type or the struct's members)
+  and `encode_return` ABI-encodes the answer. A mismatch is never guessed.
+- **`@balq/viem`**: a viem transport — `balq({ fallback: http(RPC) })` — that
+  routes `eth_getStorageAt` / getter `eth_call` / `balq_getField` to
+  `index --serve` and everything else (and every miss) to the fallback;
+  `strict`, `addresses`, `headLag` options. Tested with a real viem client
+  against the test-bed contract: `readContract` on mapping, struct, nested
+  mapping and array getters, `latest` served locally while the archive keeps up.
+- `Layouts` in the CLI carry the ABI next to the layout when the file has one.
+
+
 
 ### Added
 - **`balq index --serve`**: reads over HTTP (localhost) while the process holds

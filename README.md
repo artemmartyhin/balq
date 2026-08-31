@@ -88,10 +88,12 @@ Full tables and method: [`docs/BENCH.md`](docs/BENCH.md).
 | apply one block, 20 addresses, ~140 records | 10 ms |
 | engine throughput, BALs in memory | 98 blocks/s |
 | `eth_getStorageAt` vs archive, 30 control samples | 0 mismatches |
-| on-disk cost per record (three indexes, redb) | 417–540 B |
+| on-disk cost per record, schema v3 synthetic worst case (random 32-byte values) | ~450 B after `compact` |
 
-The last line is the honest one: the design estimate was ~90 B/record.
-Reducing it is tracked, not hidden.
+The last line is the honest one: most of it is redb's B-tree around 64-byte
+keys, not the record; real contracts (small numbers, few slots per block)
+land well below. Going lower means a different key design, and it is
+tracked, not hidden.
 
 ## How it works
 
@@ -138,6 +140,7 @@ npm i @balq/node            # Node bindings, prebuilt for win32-x64 · linux-x64
 | crates.io | [`bal-source`](https://crates.io/crates/bal-source) | node access: traits, JSON-RPC, proof verification, primary+backup |
 | crates.io | [`bal-codec`](https://crates.io/crates/bal-codec) | EIP-7928 wire format only |
 | npm | [`@balq/node`](https://www.npmjs.com/package/@balq/node) | Node.js bindings — `Archive`, `Layout`, `view()`; the platform binaries are its `optionalDependencies` |
+| npm | [`@balq/viem`](https://www.npmjs.com/package/@balq/viem) | viem transport: `readContract` / `getStorageAt` served by `balq index --serve`, everything else by your RPC |
 
 Rust: `cargo add bal-archive bal-layout` — docs on [docs.rs](https://docs.rs/bal-archive).
 
@@ -187,6 +190,26 @@ const v = ar.view(proxy, layout).at(114591);
 v.counter; v.balances[addr]; v.totals.index; v.items[3]; v.items.length;   // bigint / boolean / string
 try { ar.view(proxy, layout).at(1).counter } catch (e) { e.code }          // "BeforeStart", never undefined
 ```
+
+### From your backend, without changing it: `@balq/viem`
+
+```ts
+import { createPublicClient, http } from "viem";
+import { balq } from "@balq/viem";
+
+const client = createPublicClient({ chain, transport: balq({ fallback: http(RPC_URL) }) });
+
+// Same code as before. `balanceOf` is the compiler-generated getter of a
+// variable in the layout, so balq answers it — verified, from disk, at any block.
+await client.readContract({ address, abi, functionName: "balanceOf", args: [user], blockNumber });
+```
+
+`balq index … --serve` speaks JSON-RPC: `eth_getStorageAt`, `eth_call` on
+public-variable getters (values, mappings, arrays, structs — matched to the
+layout by the compiler's rule, never guessed), `balq_getField` for private
+variables by name. A view with logic, another contract, logs, `pending` —
+and every miss — go to the fallback untouched. Reads of your own contracts
+stop costing archive RPC: one BAL per block in, unlimited reads out.
 
 ## What a read can say instead of a value
 

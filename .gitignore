@@ -20,3 +20,5 @@ crates/bal-node/rel/
 testbed/demo.redb
 testbed/demo-sync.*
 crates/bal-node/rel-*/
+packages/viem/node_modules/
+packages/viem/package-lock.json

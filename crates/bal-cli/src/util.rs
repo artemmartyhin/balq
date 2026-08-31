@@ -126,11 +126,35 @@ pub fn emit(v: &Value) {
     );
 }
 
+/// A contract as the CLI knows it: its storage layout and, when the file
+/// carried an ABI, its `view` functions — so `eth_call` on a getter can be
+/// answered from the archive.
+pub struct Contract {
+    pub layout: Layout,
+    pub getters: bal_layout::Getters,
+    /// Where it came from, for messages.
+    pub source: std::path::PathBuf,
+}
+
+fn load_contract(p: &Path) -> Result<Contract> {
+    let layout = load_layout(p)?;
+    let getters = std::fs::read_to_string(p)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map(|v| bal_layout::Getters::from_artifact_json(&v))
+        .unwrap_or_default();
+    Ok(Contract {
+        layout,
+        getters,
+        source: p.to_path_buf(),
+    })
+}
+
 /// Layouts by address, with an optional default for the rest.
 #[derive(Default)]
 pub struct Layouts {
-    pub default: Option<Layout>,
-    pub per: std::collections::HashMap<alloy_primitives::Address, Layout>,
+    pub default: Option<Contract>,
+    pub per: std::collections::HashMap<alloy_primitives::Address, Contract>,
 }
 
 impl Layouts {
@@ -140,10 +164,10 @@ impl Layouts {
     pub fn load(cfg: &crate::config::Config, flags: &[String]) -> Result<Self> {
         let mut out = Self::default();
         if let Some(p) = &cfg.layout {
-            out.default = Some(load_layout(p)?);
+            out.default = Some(load_contract(p)?);
         }
         for (a, p) in &cfg.layouts {
-            out.per.insert(*a, load_layout(p)?);
+            out.per.insert(*a, load_contract(p)?);
         }
         for f in flags {
             match f.split_once('=') {
@@ -151,16 +175,20 @@ impl Layouts {
                     let a: alloy_primitives::Address = addr
                         .parse()
                         .with_context(|| format!("bad address in --layout {f}"))?;
-                    out.per.insert(a, load_layout(Path::new(path))?);
+                    out.per.insert(a, load_contract(Path::new(path))?);
                 }
-                _ => out.default = Some(load_layout(Path::new(f))?),
+                _ => out.default = Some(load_contract(Path::new(f))?),
             }
         }
         Ok(out)
     }
 
-    pub fn get(&self, addr: &alloy_primitives::Address) -> Option<&Layout> {
+    pub fn contract(&self, addr: &alloy_primitives::Address) -> Option<&Contract> {
         self.per.get(addr).or(self.default.as_ref())
+    }
+
+    pub fn get(&self, addr: &alloy_primitives::Address) -> Option<&Layout> {
+        self.contract(addr).map(|c| &c.layout)
     }
 
     pub fn is_empty(&self) -> bool {

@@ -61,7 +61,10 @@ pub type Result<T> = std::result::Result<T, LayoutError>;
 /// a self-referential type in a crafted file would otherwise recurse forever.
 const MAX_NESTING: usize = 32;
 
+mod abi;
 mod ext;
+
+pub use abi::{encode_return, word_address, Getter, Getters, ResolvedCall};
 
 /// One variable (or struct member) as solc reports it.
 #[derive(Debug, Clone, Deserialize)]
