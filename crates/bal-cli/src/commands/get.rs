@@ -1,5 +1,5 @@
 use super::Ctx;
-use crate::util::{emit, load_layout, na_json, named, parse_slot, prov, short};
+use crate::util::{emit, layout_file, load_layout, na_json, named, parse_slot, prov, short};
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
 use bal_archive::NotAvailable;
@@ -20,7 +20,11 @@ pub struct Opts {
 
 pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     let ar = ctx.open()?;
-    let layout = o.layout.as_deref().map(load_layout).transpose()?;
+    let layout = o
+        .layout
+        .as_deref()
+        .map(|p| layout_file(ctx, p, o.address, o.rpc.as_deref()).and_then(|f| load_layout(&f)))
+        .transpose()?;
     let (slot, loc) = match (&o.slot, &o.field, &layout) {
         (Some(s), _, _) => (parse_slot(s)?, None),
         (None, Some(f), Some(l)) => {

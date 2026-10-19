@@ -1,0 +1,5 @@
+type Holder {
+  id: ID!            # address
+  balance: BigInt!   # as of `block`
+  block: Int!
+}

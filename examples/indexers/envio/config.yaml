@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=./node_modules/envio/evm.schema.json
+name: balq-example-envio
+description: WETH holders on Sepolia, balances read at each Transfer's block from balq
+contracts:
+  - name: WETH
+    events:
+      - event: Transfer(address indexed src, address indexed dst, uint256 wad)
+chains:
+  - id: 11155111
+    start_block: 11936100
+    end_block: 11936300
+    # Logs come from HyperSync, as usual. The state read in the handler
+    # goes to balq through the Effect in src/handlers/WETH.ts.
+    contracts:
+      - name: WETH
+        address: 0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9

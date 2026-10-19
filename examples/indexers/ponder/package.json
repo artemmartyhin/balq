@@ -1,0 +1,14 @@
+{
+  "name": "balq-example-ponder",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "ponder dev",
+    "start": "ponder start"
+  },
+  "dependencies": {
+    "hono": "^4.0.0",
+    "ponder": "^0.18.0",
+    "viem": "^2.0.0"
+  }
+}

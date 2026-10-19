@@ -57,5 +57,7 @@ balq({
 ```
 
 Works with anything built on viem — Ponder, wagmi's server side, your own
-indexer or bot. The archive is verified against block headers; the RPC is
+indexer or bot. For software that takes only an RPC URL (Subsquid, scripts),
+run `balq index … --serve --upstream` and use the serve URL instead; see
+[`examples/indexers`](../../examples/indexers). The archive is verified against block headers; the RPC is
 never trusted for what balq answers.

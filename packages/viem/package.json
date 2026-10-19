@@ -1,6 +1,6 @@
 {
   "name": "@balq/viem",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "viem transport that reads your contracts' storage from a local balq archive (EIP-7928 Block Access Lists) and falls back to your RPC for everything else",
   "type": "module",
   "main": "./index.js",

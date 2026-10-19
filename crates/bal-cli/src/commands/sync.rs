@@ -79,8 +79,19 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
             ..Default::default()
         },
     )?;
-    let layouts = Layouts::load(&ctx.cfg, &[])?;
+    let mut layouts = Layouts::load(&ctx.cfg, &[])?;
     let addrs: Vec<_> = ar.watchlist()?.into_iter().map(|(a, _)| a).collect();
+    if layouts.wants_auto() {
+        // Cache first: `index` fetched them; a miss is fetched now.
+        let chain = crate::sourcify::chain_id(&rpc)?;
+        for n in tokio::task::block_in_place(|| {
+            layouts.resolve_auto(&ctx.cfg, &ctx.data, chain, &addrs, false)
+        }) {
+            if let crate::util::AutoNote::Failed(a, e) = n {
+                ui::warn(format!("{}  no layout: {e}", ui::short_addr(a)));
+            }
+        }
+    }
     let src = Fallback::new(JsonRpcSource::new(&rpc), backup.map(JsonRpcSource::new));
     let state: Option<&dyn StateSource> = if o.prove { Some(&src) } else { None };
 

@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod remote;
 mod serve;
+mod sourcify;
 mod ui;
 mod util;
 
@@ -46,6 +47,8 @@ enum Cmd {
         rpc: Option<String>,
         /// Storage layout for field names: a path (all addresses) or
         /// `0xADDR=path` (one address); repeatable. Or `layout` / `[layouts]` in balq.toml.
+        /// `auto` (or `0xADDR=auto`) fetches each verified contract's layout
+        /// from Sourcify — a proxy's from its implementation.
         #[arg(long)]
         layout: Vec<String>,
         /// Backfill only this many blocks back from the start (default: to the deploy).
@@ -68,6 +71,11 @@ enum Cmd {
         /// terminal despite the single-process file (default 127.0.0.1:7928).
         #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:7928")]
         serve: Option<String>,
+        /// With --serve: relay everything balq cannot answer to this node
+        /// (default: --rpc), so the serve URL is a drop-in RPC endpoint for
+        /// indexers — historical storage reads local, the rest from the node.
+        #[arg(long, num_args = 0..=1, default_missing_value = "", requires = "serve")]
+        upstream: Option<String>,
     },
     /// Day 0: does this node serve BALs, for old blocks too, and proofs?
     Probe {
@@ -157,7 +165,8 @@ enum Cmd {
         /// Field path, e.g. `totals.index`, `balances[0xabc…]`, `items[2]`. Needs --layout.
         #[arg(long, requires = "layout")]
         field: Option<String>,
-        /// solc storageLayout JSON or a forge/hardhat artifact containing one.
+        /// solc storageLayout JSON or a forge/hardhat artifact containing one;
+        /// `auto` for the layout `index --layout auto` fetched from Sourcify.
         #[arg(long)]
         layout: Option<PathBuf>,
         #[arg(long)]
@@ -188,7 +197,7 @@ enum Cmd {
         from: u64,
         #[arg(long)]
         to: u64,
-        /// Name slots via a storage layout. Unresolvable slots stay `[raw]`.
+        /// Name slots via a storage layout (`auto`: from Sourcify). Unresolvable slots stay `[raw]`.
         #[arg(long)]
         layout: Option<PathBuf>,
         /// Candidate mapping keys (comma-separated addresses or numbers), so
@@ -287,6 +296,7 @@ async fn main() -> Result<()> {
             poll,
             backup_rpc,
             serve,
+            upstream,
         } => {
             commands::index::run(
                 &ctx,
@@ -300,6 +310,7 @@ async fn main() -> Result<()> {
                     poll,
                     backup_rpc,
                     serve,
+                    upstream,
                 },
             )
             .await

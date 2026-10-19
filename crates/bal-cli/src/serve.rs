@@ -31,6 +31,14 @@
 //!
 //! A sidecar file `<archive>.serve` holds the URL; `Ctx::open` reads it
 //! when the file is locked.
+//!
+//! **Pass-through** (`--upstream`): everything above that balq cannot
+//! answer — any other method, `latest` / `safe` / `finalized` reads, every
+//! miss — is sent unchanged to the node and its answer returned, so the
+//! server is a drop-in RPC URL for software that cannot take a custom
+//! transport (Subsquid, Envio, scripts): historical reads of indexed
+//! contracts come from the archive, the rest from the node. Each response
+//! says which in an `X-Balq` header (`local`, `upstream`, `mixed`).
 
 use crate::util::{na_code, na_json_full, prov, Layouts};
 use alloy_primitives::{Address, B256, U256};
@@ -39,11 +47,21 @@ use bal_layout::{encode_return, Value as LValue};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tiny_http::{Header, Method, Response, Server};
 
 /// Largest request body accepted.
 const MAX_REQUEST: usize = 1 << 20;
+/// Largest upstream response relayed (`eth_getLogs` can be big).
+const MAX_UPSTREAM: u64 = 64 << 20;
+/// Threads answering requests: a slow pass-through must not stall reads.
+const WORKERS: usize = 8;
+
+/// JSON-RPC requests answered from the archive / relayed upstream since
+/// start; `balq_status` reports them.
+static ANSWERED_LOCAL: AtomicU64 = AtomicU64::new(0);
+static RELAYED: AtomicU64 = AtomicU64::new(0);
 
 /// Path of the sidecar that advertises a running server for `data`.
 pub fn sidecar(data: &Path) -> PathBuf {
@@ -62,47 +80,92 @@ impl Drop for Advertised {
     }
 }
 
-/// Bind `listen`, write the sidecar, and answer on a background thread.
+/// Bind `listen`, write the sidecar, and answer on background threads.
+/// With `upstream`, whatever balq cannot answer is relayed to that node.
 pub fn start(
     ar: Arc<Archive>,
     layouts: Arc<Layouts>,
     data: &Path,
     listen: &str,
+    upstream: Option<String>,
 ) -> anyhow::Result<(String, Advertised)> {
-    let server = Server::http(listen).map_err(|e| anyhow::anyhow!("serve on {listen}: {e}"))?;
+    let server =
+        Arc::new(Server::http(listen).map_err(|e| anyhow::anyhow!("serve on {listen}: {e}"))?);
     let url = format!("http://{}", server.server_addr());
     let side = sidecar(data);
     std::fs::write(&side, &url)?;
-    std::thread::Builder::new()
-        .name("balq-serve".into())
-        .spawn(move || {
-            for mut req in server.incoming_requests() {
-                let (status, body) = match req.method() {
-                    Method::Post => {
-                        let mut buf = String::new();
-                        let read = req
-                            .as_reader()
-                            .take(MAX_REQUEST as u64 + 1)
-                            .read_to_string(&mut buf);
-                        if read.is_err() || buf.len() > MAX_REQUEST {
-                            (
-                                413,
-                                rpc_error(Value::Null, -32600, "request too large", None),
-                            )
-                        } else {
-                            (200, rpc_dispatch(&ar, &layouts, &buf))
-                        }
-                    }
-                    _ => rest(&ar, req.url()),
-                };
-                let mut resp = Response::from_string(body.to_string()).with_status_code(status);
-                if let Ok(h) = Header::from_bytes("Content-Type", "application/json") {
-                    resp = resp.with_header(h);
+    let up = upstream.map(|u| Arc::new(Upstream::new(u)));
+    for i in 0..WORKERS {
+        let (server, ar, layouts, up) = (server.clone(), ar.clone(), layouts.clone(), up.clone());
+        std::thread::Builder::new()
+            .name(format!("balq-serve-{i}"))
+            .spawn(move || {
+                for req in server.incoming_requests() {
+                    answer(req, &ar, &layouts, up.as_deref());
                 }
-                let _ = req.respond(resp);
-            }
-        })?;
+            })?;
+    }
     Ok((url, Advertised(side)))
+}
+
+fn answer(mut req: tiny_http::Request, ar: &Archive, layouts: &Layouts, up: Option<&Upstream>) {
+    let (status, body, via) = match req.method() {
+        Method::Post => {
+            let mut buf = String::new();
+            let read = req
+                .as_reader()
+                .take(MAX_REQUEST as u64 + 1)
+                .read_to_string(&mut buf);
+            if read.is_err() || buf.len() > MAX_REQUEST {
+                (
+                    413,
+                    rpc_error(Value::Null, -32600, "request too large", None),
+                    None,
+                )
+            } else {
+                let relayed = match up {
+                    Some(up) => relay_dispatch(ar, layouts, up, &buf),
+                    None => Ok((rpc_dispatch(ar, layouts, &buf), Via::Local)),
+                };
+                match relayed {
+                    Ok((body, via)) => (200, body, Some(via)),
+                    Err(r) => return refuse(req, r),
+                }
+            }
+        }
+        _ => {
+            let (s, b) = rest(ar, req.url());
+            (s, b, None)
+        }
+    };
+    let mut resp = Response::from_string(body.to_string()).with_status_code(status);
+    if let Ok(h) = Header::from_bytes("Content-Type", "application/json") {
+        resp = resp.with_header(h);
+    }
+    if let (Some(v), true) = (via, up.is_some()) {
+        if let Ok(h) = Header::from_bytes("X-Balq", v.as_str()) {
+            resp = resp.with_header(h);
+        }
+    }
+    let _ = req.respond(resp);
+}
+
+/// Hand the node's refusal (429, 5xx, a dead connection) to the client as
+/// the node gave it, so the client's own retry and backoff apply.
+fn refuse(req: tiny_http::Request, r: Refused) {
+    let mut resp = Response::from_string(r.body).with_status_code(r.status);
+    for (k, v) in [
+        Some(("X-Balq", "upstream".to_string())),
+        r.retry_after.map(|v| ("Retry-After", v)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(h) = Header::from_bytes(k, v.as_bytes()) {
+            resp = resp.with_header(h);
+        }
+    }
+    let _ = req.respond(resp);
 }
 
 // ---- JSON-RPC ---------------------------------------------------------------
@@ -330,8 +393,190 @@ fn handle(ar: &Archive, layouts: &Layouts, method: &str, p: &[Value]) -> Result<
                 "setAt": v.set_at, "provenance": prov(v.provenance),
             }))
         }
-        "balq_status" => Ok(crate::util::stats_json(&ar.stats()?)),
+        "balq_status" => {
+            let mut v = crate::util::stats_json(&ar.stats()?);
+            v["served"] = json!({
+                "local": ANSWERED_LOCAL.load(Ordering::Relaxed),
+                "relayed": RELAYED.load(Ordering::Relaxed),
+            });
+            Ok(v)
+        }
         other => Err(RpcErr::NoMethod(format!("{other}: not served by balq"))),
+    }
+}
+
+// ---- pass-through ------------------------------------------------------------
+
+/// Who answered a request.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Via {
+    Local,
+    Upstream,
+    Mixed,
+}
+
+impl Via {
+    fn as_str(self) -> &'static str {
+        match self {
+            Via::Local => "local",
+            Via::Upstream => "upstream",
+            Via::Mixed => "mixed",
+        }
+    }
+}
+
+/// The node said no at the HTTP level (or could not be reached: 502).
+struct Refused {
+    status: u16,
+    body: String,
+    retry_after: Option<String>,
+}
+
+/// The node behind `--upstream`.
+struct Upstream {
+    url: String,
+    agent: ureq::Agent,
+}
+
+impl Upstream {
+    fn new(url: String) -> Self {
+        let agent = ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
+        Self { url, agent }
+    }
+
+    /// POST `body` as is; the node's JSON back, or its refusal as is.
+    fn send(&self, body: &Value) -> Result<Value, Refused> {
+        let gone = |e: String| Refused {
+            status: 502,
+            body: format!("upstream {}: {e}", self.url),
+            retry_after: None,
+        };
+        let mut resp = self
+            .agent
+            .post(&self.url)
+            .send_json(body)
+            .map_err(|e| gone(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let text = resp
+            .body_mut()
+            .with_config()
+            .limit(MAX_UPSTREAM)
+            .read_to_string()
+            .map_err(|e| gone(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(Refused {
+                status,
+                body: text,
+                retry_after,
+            });
+        }
+        serde_json::from_str(&text).map_err(|e| gone(format!("not JSON ({e})")))
+    }
+}
+
+/// May balq answer this request itself? Only storage reads at a definite
+/// block: `latest` and friends are the node's — it is at the head, the
+/// archive may be a poll behind.
+fn local_candidate(req: &Value) -> bool {
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = req.get("params").and_then(|p| p.as_array());
+    let block = match method {
+        "eth_getStorageAt" | "balq_getField" => params.and_then(|p| p.get(2)),
+        "eth_call" => params.and_then(|p| p.get(1)),
+        "balq_status" => return true,
+        _ => return false,
+    };
+    match block {
+        None | Some(Value::Null) => false,
+        Some(Value::String(t)) => !matches!(
+            t.as_str(),
+            "latest" | "safe" | "finalized" | "pending" | "earliest"
+        ),
+        Some(Value::Object(o)) => o.get("blockNumber").is_some(),
+        Some(_) => true,
+    }
+}
+
+/// Answer what the archive can, relay the rest (a batch's relayed part as
+/// one upstream batch), keep the client's order and ids.
+fn relay_dispatch(
+    ar: &Archive,
+    layouts: &Layouts,
+    up: &Upstream,
+    body: &str,
+) -> Result<(Value, Via), Refused> {
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return Ok((
+            rpc_error(Value::Null, -32700, "parse error", None),
+            Via::Local,
+        ));
+    };
+    let one = |r: &Value| -> Option<Value> {
+        if !local_candidate(r) {
+            return None;
+        }
+        let out = rpc_one(ar, layouts, r.clone());
+        out.get("error").is_none().then_some(out)
+    };
+    match v {
+        Value::Array(reqs) => {
+            let mut out: Vec<Option<Value>> = reqs.iter().map(one).collect();
+            let relay: Vec<usize> = (0..reqs.len()).filter(|i| out[*i].is_none()).collect();
+            ANSWERED_LOCAL.fetch_add((reqs.len() - relay.len()) as u64, Ordering::Relaxed);
+            RELAYED.fetch_add(relay.len() as u64, Ordering::Relaxed);
+            let via = match (relay.is_empty(), relay.len() == reqs.len()) {
+                (true, _) => Via::Local,
+                (false, true) => Via::Upstream,
+                (false, false) => Via::Mixed,
+            };
+            if !relay.is_empty() {
+                let batch = Value::Array(relay.iter().map(|i| reqs[*i].clone()).collect());
+                let answers = match up.send(&batch)? {
+                    Value::Array(a) => a,
+                    single => vec![single; relay.len()],
+                };
+                // Match by id where the node gave them, else by position.
+                for (k, i) in relay.iter().enumerate() {
+                    let id = reqs[*i].get("id");
+                    if id.is_none() {
+                        continue; // a notification gets no answer
+                    }
+                    let hit = answers
+                        .iter()
+                        .find(|a| id.is_some() && a.get("id") == id)
+                        .or_else(|| answers.get(k))
+                        .cloned();
+                    out[*i] = Some(hit.unwrap_or_else(|| {
+                        rpc_error(
+                            id.cloned().unwrap_or(Value::Null),
+                            -32603,
+                            "upstream: no answer",
+                            None,
+                        )
+                    }));
+                }
+            }
+            Ok((Value::Array(out.into_iter().flatten().collect()), via))
+        }
+        r => match one(&r) {
+            Some(local) => {
+                ANSWERED_LOCAL.fetch_add(1, Ordering::Relaxed);
+                Ok((local, Via::Local))
+            }
+            None => {
+                RELAYED.fetch_add(1, Ordering::Relaxed);
+                Ok((up.send(&r)?, Via::Upstream))
+            }
+        },
     }
 }
 
@@ -436,5 +681,143 @@ fn rest(ar: &Archive, url: &str) -> (u16, Value) {
             404,
             json!({ "error": { "code": "NoRoute", "message": format!("unknown route; JSON-RPC is POST / (codes: {})", na_code(&NotAvailable::NotSynced)) } }),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node that answers every request with `"up:<method>"`, and 429 to
+    /// any body mentioning `ratelimit`.
+    fn fake_node() -> String {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        std::thread::spawn(move || {
+            for mut req in server.incoming_requests() {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                if body.contains("ratelimit") {
+                    let resp = Response::from_string("slow down")
+                        .with_status_code(429)
+                        .with_header(Header::from_bytes("Retry-After", "3").unwrap());
+                    let _ = req.respond(resp);
+                    continue;
+                }
+                let answer = |r: &Value| {
+                    rpc_ok(
+                        r["id"].clone(),
+                        json!(format!("up:{}", r["method"].as_str().unwrap())),
+                    )
+                };
+                let v: Value = serde_json::from_str(&body).unwrap();
+                let out = match &v {
+                    Value::Array(a) => Value::Array(a.iter().map(answer).collect()),
+                    r => answer(r),
+                };
+                let _ = req.respond(Response::from_string(out.to_string()));
+            }
+        });
+        url
+    }
+
+    fn rpc(id: u64, method: &str, params: Value) -> Value {
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+    }
+
+    #[test]
+    fn only_definite_block_reads_are_local_candidates() {
+        let a = "0x35825972e2ca90851b14576C531F13dA0B5d53ce";
+        let call = json!({ "to": a, "data": "0x06fdde03" });
+        for (req, local) in [
+            (rpc(1, "eth_getStorageAt", json!([a, "0x0", "0x10"])), true),
+            (
+                rpc(1, "eth_getStorageAt", json!([a, "0x0", "latest"])),
+                false,
+            ),
+            (rpc(1, "eth_getStorageAt", json!([a, "0x0"])), false),
+            (rpc(1, "eth_call", json!([call, "0x10"])), true),
+            (
+                rpc(1, "eth_call", json!([call, { "blockNumber": "0x10" }])),
+                true,
+            ),
+            (
+                rpc(1, "eth_call", json!([call, { "blockHash": "0xab" }])),
+                false,
+            ),
+            (rpc(1, "eth_call", json!([call, "finalized"])), false),
+            (rpc(1, "eth_call", json!([call])), false),
+            (rpc(1, "balq_getField", json!([a, "counter", "0x10"])), true),
+            (rpc(1, "eth_blockNumber", json!([])), false),
+            (rpc(1, "eth_getLogs", json!([{}])), false),
+            (rpc(1, "balq_status", json!([])), true),
+        ] {
+            assert_eq!(local_candidate(&req), local, "{req}");
+        }
+    }
+
+    #[test]
+    fn relay_answers_locally_relays_misses_and_keeps_batch_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let ar = Archive::open(dir.path().join("a.redb")).unwrap();
+        let layouts = Layouts::default();
+        let up = Upstream::new(fake_node());
+        let a = "0x35825972e2ca90851b14576C531F13dA0B5d53ce";
+
+        // Not watched: a miss, so the node answers — never an error.
+        let one = rpc(7, "eth_getStorageAt", json!([a, "0x0", "0x10"])).to_string();
+        let Ok((v, via)) = relay_dispatch(&ar, &layouts, &up, &one) else {
+            panic!("relayed")
+        };
+        assert_eq!(
+            (v["id"].clone(), v["result"].clone(), via),
+            (json!(7), json!("up:eth_getStorageAt"), Via::Upstream)
+        );
+
+        // A batch: local, relayed, a notification (no answer), relayed.
+        let mut note = rpc(0, "eth_chainId", json!([]));
+        note.as_object_mut().unwrap().remove("id");
+        let batch = json!([
+            rpc(1, "balq_status", json!([])),
+            rpc(2, "eth_chainId", json!([])),
+            note,
+            rpc(3, "eth_getLogs", json!([{}])),
+        ])
+        .to_string();
+        let Ok((v, via)) = relay_dispatch(&ar, &layouts, &up, &batch) else {
+            panic!("relayed")
+        };
+        assert_eq!(via, Via::Mixed);
+        let ids: Vec<_> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].clone())
+            .collect();
+        assert_eq!(ids, vec![json!(1), json!(2), json!(3)]);
+        assert!(v[0]["result"]["fileBytes"].is_u64(), "balq_status is local");
+        assert_eq!(v[1]["result"], "up:eth_chainId");
+        assert_eq!(v[2]["result"], "up:eth_getLogs");
+    }
+
+    #[test]
+    fn relay_hands_back_the_nodes_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let ar = Archive::open(dir.path().join("a.redb")).unwrap();
+        let up = Upstream::new(fake_node());
+        let req = rpc(1, "eth_getLogs", json!([{ "ratelimit": true }])).to_string();
+        let Err(r) = relay_dispatch(&ar, &Layouts::default(), &up, &req) else {
+            panic!("refused")
+        };
+        assert_eq!(
+            (r.status, r.body.as_str(), r.retry_after.as_deref()),
+            (429, "slow down", Some("3"))
+        );
+
+        let dead = Upstream::new("http://127.0.0.1:9".into());
+        let Err(r) = relay_dispatch(&ar, &Layouts::default(), &dead, &req) else {
+            panic!("refused")
+        };
+        assert_eq!(r.status, 502);
     }
 }

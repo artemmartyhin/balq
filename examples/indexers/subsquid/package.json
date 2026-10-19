@@ -1,0 +1,13 @@
+{
+  "name": "balq-example-subsquid",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "@subsquid/evm-abi": "^1.0.0",
+    "@subsquid/evm-codec": "^1.0.0",
+    "@subsquid/evm-processor": "^1.30.0"
+  }
+}

@@ -66,7 +66,8 @@ pub async fn run(ctx: &Ctx, rpc: Option<String>, age: u64) -> Result<()> {
             "balMethod": BAL_METHOD,
             "q1Head": probe_json(&r.head_probe),
             "q2Old": probe_json(&r.old_probe),
-            "q2Block1": probe_json(&r.earliest_probe),
+            "balSince": r.bal_since.map(|f| json!({ "block": f.block, "exact": f.exact })),
+            "q2Fork": probe_json(&r.earliest_probe),
             "proofWindow": match &r.proof_window {
                 Ok(w) => json!(w),
                 Err(e) => json!({ "error": e }),
@@ -96,10 +97,22 @@ pub async fn run(ctx: &Ctx, rpc: Option<String>, age: u64) -> Result<()> {
         }
     );
     println!("method:        {BAL_METHOD}");
+    match r.bal_since {
+        Some(f) if f.block == 1 => println!("BAL since:     block 1 (fork at genesis)"),
+        Some(f) if f.exact => println!(
+            "BAL since:     block {} (the fork; a contract older than it has no BAL history before it)",
+            f.block
+        ),
+        Some(f) => println!(
+            "BAL since:     block {} or earlier (older headers pruned on this node)",
+            f.block
+        ),
+        None => {}
+    }
     println!();
     println!("{:<16}{}", "Q1 head", probe_line(&r.head_probe));
     println!("{:<16}{}", "Q2 old", probe_line(&r.old_probe));
-    println!("{:<16}{}", "Q2 block 1", probe_line(&r.earliest_probe));
+    println!("{:<16}{}", "Q2 fork", probe_line(&r.earliest_probe));
     match &r.proof_window {
         Ok(0) => {
             println!("eth_getProof    window 0 — proofs only at head.");

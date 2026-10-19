@@ -1,0 +1,15 @@
+{
+  "name": "balq-example-envio",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "codegen": "envio codegen",
+    "dev": "envio dev",
+    "start": "envio start"
+  },
+  "dependencies": {
+    "@balq/viem": "^0.5.0",
+    "envio": "^3.14.0",
+    "viem": "^2.0.0"
+  }
+}

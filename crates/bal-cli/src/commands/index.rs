@@ -5,7 +5,7 @@
 use super::Ctx;
 use crate::commands::sync::report_json;
 use crate::ui;
-use crate::util::{emit, short, Layouts};
+use crate::util::{emit, short, AutoNote, Layouts};
 use alloy_primitives::{Address, B256};
 use anyhow::{bail, Result};
 use bal_archive::{Archive, BackfillOpts, BackfillStop, SyncReport};
@@ -24,6 +24,8 @@ pub struct Opts {
     pub backup_rpc: Option<String>,
     /// Answer reads over HTTP on this address while running.
     pub serve: Option<String>,
+    /// Relay what balq cannot answer to this node (`""`: the --rpc one).
+    pub upstream: Option<String>,
 }
 
 /// Blocks per step between progress updates.
@@ -76,27 +78,44 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
     if addrs.is_empty() {
         bail!("nothing to index: pass an address, or set `watch = [\"0x…\"]` in balq.toml");
     }
-    let layouts = std::sync::Arc::new(Layouts::load(&ctx.cfg, &o.layout)?);
+    let mut layouts = Layouts::load(&ctx.cfg, &o.layout)?;
 
     let info = JsonRpcSource::new(&rpc);
+    let (client, chain) = node_info(&info).await;
+    let auto_notes = match (layouts.wants_auto(), chain) {
+        (false, _) => Vec::new(),
+        (true, None) => bail!(
+            "--layout auto: the node did not answer eth_chainId, and Sourcify is keyed by chain"
+        ),
+        (true, Some(c)) => tokio::task::block_in_place(|| {
+            layouts.resolve_auto(&ctx.cfg, &ctx.data, c, &addrs, true)
+        }),
+    };
+    let layouts = std::sync::Arc::new(layouts);
     let src = Fallback::new(JsonRpcSource::new(&rpc), backup.map(JsonRpcSource::new));
     let head = src.head().await?;
     let ar = std::sync::Arc::new(ctx.open_local()?);
     let _served = match &o.serve {
         Some(listen) => {
-            let (url, guard) = crate::serve::start(ar.clone(), layouts.clone(), &ctx.data, listen)?;
+            let upstream = o
+                .upstream
+                .clone()
+                .map(|u| if u.is_empty() { rpc.clone() } else { u });
+            let relays = upstream.as_deref().map(host);
+            let (url, guard) =
+                crate::serve::start(ar.clone(), layouts.clone(), &ctx.data, listen, upstream)?;
             if ctx.json {
-                emit(&json!({ "serving": url }));
+                emit(&json!({ "serving": url, "upstream": relays }));
             } else {
-                ui::kv(
-                    "serve",
-                    format!(
-                        "{url}  {}",
-                        ui::dim(
-                            "— other `balq get/diff/history/status` on this file read from here"
-                        )
+                let note = match &relays {
+                    Some(h) => format!(
+                        "— RPC endpoint: storage reads from the archive, the rest relayed to {h}"
                     ),
-                );
+                    None => {
+                        "— other `balq get/diff/history/status` on this file read from here".into()
+                    }
+                };
+                ui::kv("serve", format!("{url}  {}", ui::dim(note)));
             }
             Some(guard)
         }
@@ -105,7 +124,6 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
 
     if !ctx.json {
         ui::banner();
-        let (client, chain) = node_info(&info).await;
         let mut node = host(&rpc);
         if let Some(c) = client {
             node.push_str(&format!(
@@ -153,7 +171,14 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
                 ),
             );
         }
+        for n in &auto_notes {
+            auto_line(n);
+        }
         println!();
+    } else {
+        for n in &auto_notes {
+            emit(&auto_json(n));
+        }
     }
 
     // Watches: a new address starts at the node's head (a block that
@@ -252,6 +277,55 @@ pub async fn run(ctx: &Ctx, o: Opts) -> Result<()> {
             }
             Err(e) => retry_note(ctx, &e, o.poll),
         }
+    }
+}
+
+/// `0x7b79…E7f9  layout ← Sourcify: WETH`, or why there is none.
+fn auto_line(n: &AutoNote) {
+    match n {
+        AutoNote::Fetched(a, f) => {
+            let mut what = format!("layout ← Sourcify: {}", ui::bold(&f.name));
+            if let Some(i) = f.implementation {
+                what.push_str(&format!(
+                    " {}",
+                    ui::dim(format!(
+                        "(implementation {} behind this proxy)",
+                        ui::short_addr(i)
+                    ))
+                ));
+            }
+            if f.imported {
+                what.push_str(&format!(" {}", ui::dim("(imported from Etherscan)")));
+            }
+            ui::ok(format!("{}  {what}", ui::short_addr(a)));
+        }
+        AutoNote::Cached(a, p, None) => ui::ok(format!(
+            "{}  layout ← cache {}",
+            ui::short_addr(a),
+            ui::dim(p.display())
+        )),
+        AutoNote::Cached(a, p, Some(e)) => ui::warn(format!(
+            "{}  Sourcify: {e} — using the cached layout {}",
+            ui::short_addr(a),
+            ui::dim(p.display())
+        )),
+        AutoNote::Failed(a, e) => ui::warn(format!(
+            "{}  no layout: {e} — changes show as raw slots",
+            ui::short_addr(a)
+        )),
+    }
+}
+
+fn auto_json(n: &AutoNote) -> serde_json::Value {
+    match n {
+        AutoNote::Fetched(a, f) => json!({
+            "layout": a, "source": "sourcify", "contract": f.name,
+            "implementation": f.implementation, "importedFromEtherscan": f.imported, "path": f.path,
+        }),
+        AutoNote::Cached(a, p, e) => {
+            json!({ "layout": a, "source": "cache", "path": p, "fetchError": e })
+        }
+        AutoNote::Failed(a, e) => json!({ "layout": a, "error": e }),
     }
 }
 

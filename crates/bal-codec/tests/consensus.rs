@@ -1,8 +1,10 @@
-//! Known-answer test against consensus data: a real `eth_getBlockAccessList`
-//! response from Platåberget (reth 2.5.0), block 114205, whose header carries
-//! `blockAccessListHash = 0x8a6e…7241`. If this test fails, either the wire
-//! format changed or the JSON mapping is wrong — in both cases nothing above
-//! the codec can be trusted until it is fixed.
+//! Known-answer tests against consensus data: real `eth_getBlockAccessList`
+//! responses whose headers carry the hash they must reproduce —
+//! Platåberget (reth 2.5.0) block 114205, `0x8a6e…7241`, and Sepolia
+//! (reth 2.7.0) block 11856337, the first Glamsterdam block there,
+//! `0xe604…8a55`. If one fails, either the wire format changed or the JSON
+//! mapping is wrong — in both cases nothing above the codec can be trusted
+//! until it is fixed.
 //!
 //! Run with `cargo test -p bal-codec --features json`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -12,10 +14,15 @@ use alloy_primitives::{address, b256};
 use bal_codec::BlockAccessList;
 
 const RESPONSE: &str = include_str!("fixtures/plataberget_114205.json");
+const SEPOLIA_FORK: &str = include_str!("fixtures/sepolia_11856337.json");
+
+fn parse(response: &str) -> BlockAccessList {
+    let v: serde_json::Value = serde_json::from_str(response).unwrap();
+    BlockAccessList::from_rpc_json(&v["result"]).expect("valid BAL")
+}
 
 fn fixture() -> BlockAccessList {
-    let v: serde_json::Value = serde_json::from_str(RESPONSE).unwrap();
-    BlockAccessList::from_rpc_json(&v["result"]).expect("valid BAL")
+    parse(RESPONSE)
 }
 
 #[test]
@@ -29,6 +36,17 @@ fn json_roundtrips_to_header_hash() {
     );
     assert!(bal.verify(expected).is_ok());
     assert_eq!(bal.accounts.len(), 144);
+}
+
+#[test]
+fn sepolia_fork_block_matches_header() {
+    let bal = parse(SEPOLIA_FORK);
+    let expected = b256!("e6048b5d71a01b46691aa7d24238ba7880b789ae42173cab10a041b72e768a55");
+    assert_eq!(bal.hash(), expected);
+    assert!(bal.verify(expected).is_ok());
+    assert_eq!(bal.accounts.len(), 280);
+    let back = BlockAccessList::decode(&bal.encode_rlp()).unwrap();
+    assert_eq!(back, bal);
 }
 
 #[test]

@@ -5,6 +5,37 @@ All notable changes to this project are documented here. The format follows
 [SemVer](https://semver.org/). Until 1.0, minor versions may break the API
 and the on-disk schema (`SCHEMA_VERSION`).
 
+## [0.5.0] — 2026-10-19
+
+### Added
+- **Sepolia.** Glamsterdam is live there since block 11,856,337
+  (2026-10-06). Known-answer test against Sepolia's first BAL block
+  (`bal-codec/tests/fixtures/sepolia_11856337.json`, 280 accounts, header hash
+  confirmed on two providers); CI probes a public Sepolia endpoint; README
+  lists which public endpoints serve `eth_getBlockAccessList`.
+- **`--layout auto`**: the layout and ABI of a verified contract from
+  Sourcify (`index`, `get`, `diff`, `sync`; `auto` / `0xADDR=auto` in
+  balq.toml too). Proxies resolve to their implementation; cached as an
+  artifact at `<archive>.layouts/<chain>/<addr>.json`. Contracts verified
+  only on Etherscan are imported into Sourcify when `ETHERSCAN_API_KEY` /
+  `etherscan_api_key` is set. balq.toml: `sourcify`, `etherscan_api_key`.
+- **`index --serve --upstream [URL]`**: the serve endpoint relays what balq
+  cannot answer — other methods, `latest`, every miss — to the node
+  (default `--rpc`), so it is a drop-in RPC URL for indexers. Node refusals
+  (429, 5xx) pass through with their status and `Retry-After`; `X-Balq`
+  says who answered; `balq_status` gains `served { local, relayed }`.
+  `examples/indexers`: Ponder and Subsquid run end to end on Sepolia through
+  it, Envio through `@balq/viem` in an Effect.
+- `balq probe` finds the fork block (`BAL since`, header bisection; an upper
+  bound when older headers are pruned) and probes it instead of block 1.
+  `bal_source::JsonRpcSource::find_bal_fork`, `BalFork`.
+
+### Changed
+- `probe --json`: `q2Block1` → `q2Fork`, new `balSince { block, exact }`;
+  `ProbeReport` gains `bal_since`.
+- `index --serve` answers on 8 threads, so a slow relayed call does not
+  stall local reads.
+
 ## [0.4.0] — 2026-08-31
 
 ### Added

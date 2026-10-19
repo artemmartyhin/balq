@@ -9,7 +9,7 @@ body:
         the report is reproducible in one command.
   - type: input
     id: network
-    attributes: { label: Network / chain id, placeholder: "Platåberget (7091047534)" }
+    attributes: { label: Network / chain id, placeholder: "Sepolia (11155111)" }
     validations: { required: true }
   - type: input
     id: address

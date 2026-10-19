@@ -325,3 +325,54 @@ a full node keeps forever — the BAL is part of the block body.
 - **Names.** `BootstrapPending`/`BootstrapLost` → `UnknownBefore`,
   `NotBootstrapped` → `NeverRecorded`: the concept is "no record before N",
   the proof machinery is an implementation detail behind `--prove`.
+
+## Sepolia: answered 2026-10-17
+
+Glamsterdam activated on Sepolia at block **11,856,337** (2026-10-06
+13:53:36 UTC): the first header with `blockAccessListHash`, found by
+bisecting headers (`balq probe` now does this on any chain; on Platåberget
+it reports 48,363, which matches "Gloas at ≈49152" above. The old "Q2 block 1"
+probe was hitting a pre-fork block there all along).
+
+| endpoint | client | header hash | `eth_getBlockAccessList` |
+|---|---|---|---|
+| ethereum-sepolia-rpc.publicnode.com | reth 2.7.0 | yes | **yes**: head, 1k and 80k blocks back, the fork block, all VERIFIED. History before 1,000,000 pruned (`4444`); proofs at head only |
+| sepolia.rpc.thirdweb.com | gateway | yes | old blocks VERIFIED; the head block sometimes `null` (a lagging backend); proof window 4096 |
+| rpc.sepolia.ethpandaops.io | Nethermind 2.2.0 | yes | blocked by the gateway (`method ignored by upstream`) |
+| Infura, Tenderly gateway, 1rpc | — | yes | `method not found` |
+| sepolia.drpc.org (free) | — | — | Sepolia not on the free plan |
+
+The codec needed no change: Sepolia's JSON is field-for-field Platåberget's,
+and `keccak(rlp(bal))` matched on every block tried. Block 11,856,337 is now
+a second known-answer fixture.
+
+## `--layout auto`: Sourcify, Etherscan through it (2026-10-17)
+
+- **Sourcify** v2 (`/v2/contract/{chain}/{addr}?fields=abi,storageLayout,proxyResolution`)
+  returns solc's `storageLayout` for verified contracts, and resolves
+  proxies to implementations. Checked on Sepolia WETH (5 variables) and USDC
+  (ZeppelinOS proxy → `FiatTokenV2_2`); values read by the fetched names
+  equal `eth_call` on the node.
+- **Etherscan** exposes sources and settings, never a layout; producing one
+  means compiling. Sourcify's "import from Etherscan" does exactly that, so
+  balq uses it instead of shipping solc. It publishes a verification on
+  Sourcify, so it runs only when an Etherscan key is configured: without
+  one, `auto` is read-only.
+- **Cache** next to the archive, keyed by chain and address, written as a
+  forge-shaped artifact so nothing downstream needs to know where it came
+  from. `index` refreshes it on start; `get`/`diff` prefer it.
+- **Proxy upgrades** are not tracked: the current implementation names all
+  history. Honest limit, stated in the README.
+
+## Serve as an RPC endpoint for indexers (2026-10-17)
+
+Ponder and Envio run viem, so `@balq/viem` already fits them; Subsquid has
+its own RPC client and takes only a URL. Rather than one adapter per
+indexer, `--serve --upstream` makes the serve endpoint a relay: answer
+locally only storage reads at a definite block, relay the rest byte for
+byte. `latest` is always relayed — the node is at the head, the archive a
+poll behind. A miss is relayed, never surfaced: the relay is never worse
+than the node. HTTP-level refusals pass through unchanged because indexers
+retry on 429/5xx but treat JSON-RPC errors as fatal (Subsquid did, until
+this was fixed). Measured with Ponder over 200 Sepolia blocks: 383 local,
+320 relayed; balances 33/33 equal to the node's `eth_call`.

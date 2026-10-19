@@ -1,5 +1,5 @@
 use super::Ctx;
-use crate::util::{emit, load_layout, na_code, na_short, short};
+use crate::util::{emit, layout_file, load_layout, na_code, na_short, short};
 use alloy_primitives::Address;
 use anyhow::{anyhow, Result};
 use bal_archive::{NotAvailable, StorageValue};
@@ -30,7 +30,10 @@ pub fn run(
     if to <= from {
         return Err(anyhow!("--to must be > --from"));
     }
-    let layout = layout.as_deref().map(load_layout).transpose()?;
+    let layout = layout
+        .as_deref()
+        .map(|p| layout_file(ctx, p, address, None).and_then(|f| load_layout(&f)))
+        .transpose()?;
     let mut slots = std::collections::BTreeSet::new();
     for b in from + 1..=to {
         for s in ar.changed_slots(address, b).map_err(|e| anyhow!("{e}"))? {

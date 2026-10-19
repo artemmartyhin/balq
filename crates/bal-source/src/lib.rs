@@ -11,7 +11,7 @@ mod jsonrpc;
 pub mod proof;
 
 pub use fallback::Fallback;
-pub use jsonrpc::{BalProbe, JsonRpcSource, ProbeReport, BAL_HASH_FIELD, BAL_METHOD};
+pub use jsonrpc::{BalFork, BalProbe, JsonRpcSource, ProbeReport, BAL_HASH_FIELD, BAL_METHOD};
 pub use proof::{check_requested, verify_account_proof, ProofError};
 
 use alloy_primitives::{Address, Bytes, B256, U256};

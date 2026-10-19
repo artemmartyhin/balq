@@ -123,6 +123,27 @@ flowchart LR
 - **Provenance.** Every value is tagged `bal`, `proof` (optional
   `eth_getProof` shortcut), or (opt-in only) `unverified` / `imported`.
 
+## Networks
+
+| network | chain id | BALs since | endpoints that serve `eth_getBlockAccessList` |
+|---|---:|---:|---|
+| **Sepolia** | 11155111 | block 11,856,337 (2026-10-06) | `ethereum-sepolia-rpc.publicnode.com` (reth, head and history); `sepolia.rpc.thirdweb.com` (history; the head block sometimes `null`) |
+| Platåberget (devnet) | 7091047534 | block 48,363 | `rpc.plataberget.ethpandaops.io` |
+| your own node | any | the fork | check with `balq probe` |
+
+`balq probe --rpc <url>` answers this for any endpoint: does the header carry
+`blockAccessListHash`, does the codec reproduce it at the head, an old block
+and the fork block, and where the fork is. Checked 2026-10-17 on Sepolia:
+Infura, Tenderly, 1rpc and the ethpandaops Sepolia gateway serve the header
+hash but not the method; dRPC's free tier no longer serves Sepolia.
+
+```
+balq index 0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9 \
+  --rpc https://ethereum-sepolia-rpc.publicnode.com --layout auto --history 2000
+  ✓ 0x7b79…E7f9  layout ← Sourcify: WETH
+  11936605  ▲ 1 record(s)   balanceOf[0x1F322405b44c18E66dB77459FDB1BADFe2b1dcbB] ? → 0
+```
+
 ## Install
 
 ```
@@ -149,7 +170,9 @@ Rust: `cargo add bal-archive bal-layout` — docs on [docs.rs](https://docs.rs/b
 ```
 balq index    <addr>... --rpc <url> [--layout C.json] [--serve]   # the one command: watch + backfill to the deploy + follow
                                                            #   several contracts: one walk, one file; --layout 0xADDR=C.json per address
+                                                           #   --layout auto: each verified contract's layout from Sourcify
                                                            #   --serve: get/diff/history/status work from other terminals meanwhile
+                                                           #   --serve --upstream: a drop-in RPC URL (indexers)
 balq probe    --rpc <url>                                  # does this node serve BALs, how far back?
 balq watch    <addr> [--from N | --rpc <url>]              # the parts of `index`, for scripts:
 balq sync     --rpc <url> --follow                         #   forward, verified, resumes after any downtime
@@ -175,6 +198,30 @@ several contracts) — then it is just `balq index`. Run it as a service with
 
 The layout is the `storageLayout` from your compiler (`forge inspect C
 storageLayout`, or a forge/hardhat artifact) — not the ABI.
+
+### `--layout auto`
+
+For a verified contract you did not build, `--layout auto` (or
+`0xADDR=auto`, or `layout = "auto"` / `"0x…" = "auto"` in balq.toml) fetches
+the layout and ABI from [Sourcify](https://sourcify.dev), which keeps solc's
+`storageLayout` with every verified contract. A proxy is resolved to its
+implementation as Sourcify detects it (checked on USDC on Sepolia, a
+ZeppelinOS proxy: the layout is `FiatTokenV2_2`'s).
+The result is an ordinary artifact cached at
+`<archive>.layouts/<chain>/<addr>.json`: `get` / `diff --layout auto` read it
+without the network, `typegen` and `Layout.fromFile` take its path, and
+`index` refreshes it on start (and keeps the cached copy if Sourcify is
+unreachable).
+
+Etherscan publishes sources, not layouts. For a contract verified only
+there, set `ETHERSCAN_API_KEY` (or `etherscan_api_key` in balq.toml): balq
+then asks Sourcify to import it from Etherscan — Sourcify recompiles it,
+which produces the layout, and publishes the verification, as its own
+"Import from Etherscan" does. Without a key, `auto` never writes anywhere.
+
+A proxy's layout is its *current* implementation's; reads from before an
+upgrade that moved variables are named by the new layout. Diamonds (several
+implementations) are refused: mount their facets with a manifest.
 
 ### Node
 
@@ -204,6 +251,16 @@ const client = createPublicClient({ chain, transport: balq({ fallback: http(RPC_
 await client.readContract({ address, abi, functionName: "balanceOf", args: [user], blockNumber });
 ```
 
+### Indexers: Ponder, Envio, Subsquid
+
+Event indexers need an archive node for one thing: reading contract state at
+an event's block. `balq index … --serve --upstream` is an RPC URL that
+answers those reads from the archive and relays everything else to the node
+(`--upstream` alone relays to `--rpc`). Point the indexer at it; nothing else
+changes. Ponder and Subsquid were run end to end this way on Sepolia — same
+33 holders, every balance equal to the node's — and Envio reads through
+`@balq/viem` in an Effect: [`examples/indexers`](examples/indexers).
+
 `balq index … --serve` speaks JSON-RPC: `eth_getStorageAt`, `eth_call` on
 public-variable getters (values, mappings, arrays, structs — matched to the
 layout by the compiler's rule, never guessed), `balq_getField` for private
@@ -225,7 +282,8 @@ deploy: creation seen means every value is known.
 
 ## Limits, stated
 
-- **History starts at the BAL fork.** Blocks before Glamsterdam carry no
+- **History starts at the BAL fork** (Sepolia: block 11,856,337;
+  `balq probe` finds it on any chain). Blocks before Glamsterdam carry no
   BAL; a contract that already lived then keeps its pre-fork storage
   unknown unless proven against an archive node (`sync --prove`, or
   `--backup-rpc`). Contracts deployed after the fork have complete history.
@@ -250,6 +308,7 @@ deploy: creation seen means every value is known.
 crates/            bal-codec · bal-source · bal-archive · bal-layout · bal-cli · bal-node
 docs/              SPEC.md · DECISIONS.md · BENCH.md · SECURITY-AUDIT.md · bench/
 testbed/           own contract on Platåberget + journal = ground truth for `verify` (96/96)
+examples/indexers/ Ponder · Subsquid · Envio reading state through balq
 .github/           ci: fmt · clippy · rustdoc · tests on 3 OSes · MSRV · live probe; npm prebuilds
 ```
 

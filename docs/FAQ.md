@@ -100,3 +100,28 @@ values, 20 slots per address per block — measures ~450 B per record after
 `balq compact`; real contracts (small numbers, few slots per block) land
 well below. `balq compact` after a long backfill returns free pages to the
 filesystem (4.8 → 2.8 MB on the test-bed archive).
+
+### `--layout auto`: `not verified on Sourcify`
+
+Sourcify does not have this address on this chain. If Etherscan has it,
+set `ETHERSCAN_API_KEY` (or `etherscan_api_key` in balq.toml) and run again:
+balq asks Sourcify to import and recompile it. Otherwise pass the layout
+from your own build (`--layout 0xADDR=out/C.sol/C.json`).
+
+### `--layout auto`: `without a storageLayout`
+
+The contract was compiled with solc older than 0.5.13, which does not emit
+one. Write the layout by hand or compile the source with a newer solc and
+pass the artifact.
+
+### `--layout auto`: `a diamond?`
+
+Sourcify reports several implementations. One layout cannot name them;
+mount the facets' layouts with a manifest (see `bal-layout`).
+
+### An indexer behind `--upstream` fails on `eth_getLogs`
+
+The relay passes the node's answer through; some public gateways refuse
+`eth_getLogs` without an `address` filter, and some rate-limit hard (the
+429 reaches the indexer, which retries). Give `--upstream` an endpoint
+that serves what the indexer asks — `--rpc` can stay the one with BALs.

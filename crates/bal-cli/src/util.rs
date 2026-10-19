@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use bal_archive::{NotAvailable, Provenance};
 use bal_layout::Layout;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Slot or word: `0x`-hex of any length, or a decimal of any size. A bare
 /// digit string is always decimal — never guessed as hex.
@@ -105,6 +105,45 @@ pub fn load_layout(p: &Path) -> Result<Layout> {
     Layout::from_artifact(p).with_context(|| format!("loading layout {}", p.display()))
 }
 
+/// A `--layout` argument of a one-address command (`get`, `diff`) as a
+/// file: the path itself, or for `auto` the cached Sourcify layout of
+/// `addr` — fetched first if `index` has not fetched it yet, which needs
+/// `rpc` (or `rpc` in balq.toml) to learn the chain.
+pub fn layout_file(
+    ctx: &crate::commands::Ctx,
+    p: &Path,
+    addr: alloy_primitives::Address,
+    rpc: Option<&str>,
+) -> Result<PathBuf> {
+    if !crate::sourcify::is_auto(p) {
+        return Ok(p.to_path_buf());
+    }
+    if let Some(c) = crate::sourcify::cached_any_chain(&ctx.data, addr) {
+        return Ok(c);
+    }
+    let rpc = ctx.cfg.rpc(rpc.map(String::from)).context(
+        "--layout auto: no cached layout for this address, and no RPC to learn the chain",
+    )?;
+    let chain = crate::sourcify::chain_id(&rpc)?;
+    let key = ctx.cfg.etherscan_key();
+    let opts = crate::sourcify::Opts {
+        server: ctx
+            .cfg
+            .sourcify
+            .as_deref()
+            .unwrap_or(crate::sourcify::DEFAULT_SERVER),
+        import: key.is_some(),
+        etherscan_key: key.as_deref(),
+    };
+    let f = crate::sourcify::fetch(
+        &opts,
+        chain,
+        addr,
+        &crate::sourcify::cache_path(&ctx.data, chain, addr),
+    )?;
+    Ok(f.path)
+}
+
 /// Every named field living in a raw slot, decoded from `word` if given;
 /// `keys` are candidate mapping keys.
 pub fn named(layout: &Layout, slot: B256, word: Option<B256>, keys: &[B256]) -> Vec<String> {
@@ -150,11 +189,27 @@ fn load_contract(p: &Path) -> Result<Contract> {
     })
 }
 
-/// Layouts by address, with an optional default for the rest.
+/// Layouts by address, with an optional default for the rest. A layout
+/// given as `auto` is not loaded here: it is recorded in `auto_default` /
+/// `auto_per` and fetched by [`Layouts::resolve_auto`].
 #[derive(Default)]
 pub struct Layouts {
     pub default: Option<Contract>,
     pub per: std::collections::HashMap<alloy_primitives::Address, Contract>,
+    /// `layout = "auto"` / `--layout auto`: every address without its own entry.
+    pub auto_default: bool,
+    /// `0xADDR=auto`.
+    pub auto_per: Vec<alloy_primitives::Address>,
+}
+
+/// One address's outcome of [`Layouts::resolve_auto`], for messages.
+pub enum AutoNote {
+    /// Fetched now.
+    Fetched(alloy_primitives::Address, crate::sourcify::Fetched),
+    /// Taken from the cache (no fetch asked, or the fetch failed: the error).
+    Cached(alloy_primitives::Address, PathBuf, Option<String>),
+    /// Neither: the address stays without names.
+    Failed(alloy_primitives::Address, String),
 }
 
 impl Layouts {
@@ -164,10 +219,10 @@ impl Layouts {
     pub fn load(cfg: &crate::config::Config, flags: &[String]) -> Result<Self> {
         let mut out = Self::default();
         if let Some(p) = &cfg.layout {
-            out.default = Some(load_contract(p)?);
+            out.set_default(p)?;
         }
         for (a, p) in &cfg.layouts {
-            out.per.insert(*a, load_contract(p)?);
+            out.set_one(*a, p)?;
         }
         for f in flags {
             match f.split_once('=') {
@@ -175,12 +230,92 @@ impl Layouts {
                     let a: alloy_primitives::Address = addr
                         .parse()
                         .with_context(|| format!("bad address in --layout {f}"))?;
-                    out.per.insert(a, load_contract(Path::new(path))?);
+                    out.set_one(a, Path::new(path))?;
                 }
-                _ => out.default = Some(load_contract(Path::new(f))?),
+                _ => out.set_default(Path::new(f))?,
             }
         }
         Ok(out)
+    }
+
+    fn set_default(&mut self, p: &Path) -> Result<()> {
+        if crate::sourcify::is_auto(p) {
+            (self.default, self.auto_default) = (None, true);
+        } else {
+            (self.default, self.auto_default) = (Some(load_contract(p)?), false);
+        }
+        Ok(())
+    }
+
+    fn set_one(&mut self, a: alloy_primitives::Address, p: &Path) -> Result<()> {
+        self.auto_per.retain(|x| *x != a);
+        if crate::sourcify::is_auto(p) {
+            self.per.remove(&a);
+            self.auto_per.push(a);
+        } else {
+            self.per.insert(a, load_contract(p)?);
+        }
+        Ok(())
+    }
+
+    /// Fetch (or take from the cache) every `auto` layout among `addrs`.
+    /// `refresh`: ask Sourcify even when a cached copy exists (falling back
+    /// to it if Sourcify cannot be reached); otherwise the cache wins and
+    /// Sourcify is asked only for what is missing. A failure leaves the
+    /// address without names and says so — it never stops indexing.
+    pub fn resolve_auto(
+        &mut self,
+        cfg: &crate::config::Config,
+        data: &Path,
+        chain: u64,
+        addrs: &[alloy_primitives::Address],
+        refresh: bool,
+    ) -> Vec<AutoNote> {
+        let wanted: Vec<_> = addrs
+            .iter()
+            .copied()
+            .filter(|a| {
+                self.auto_per.contains(a) || (self.auto_default && !self.per.contains_key(a))
+            })
+            .collect();
+        let key = cfg.etherscan_key();
+        let opts = crate::sourcify::Opts {
+            server: cfg
+                .sourcify
+                .as_deref()
+                .unwrap_or(crate::sourcify::DEFAULT_SERVER),
+            import: key.is_some(),
+            etherscan_key: key.as_deref(),
+        };
+        let mut notes = Vec::new();
+        for a in wanted {
+            let cache = crate::sourcify::cache_path(data, chain, a);
+            if !refresh && cache.is_file() {
+                if let Ok(c) = load_contract(&cache) {
+                    self.per.insert(a, c);
+                    notes.push(AutoNote::Cached(a, cache, None));
+                    continue;
+                }
+            }
+            let note = match crate::sourcify::fetch(&opts, chain, a, &cache) {
+                Ok(f) => match load_contract(&f.path) {
+                    Ok(c) => {
+                        self.per.insert(a, c);
+                        AutoNote::Fetched(a, f)
+                    }
+                    Err(e) => AutoNote::Failed(a, format!("{e:#}")),
+                },
+                Err(e) => match cache.is_file().then(|| load_contract(&cache)) {
+                    Some(Ok(c)) => {
+                        self.per.insert(a, c);
+                        AutoNote::Cached(a, cache, Some(format!("{e:#}")))
+                    }
+                    _ => AutoNote::Failed(a, format!("{e:#}")),
+                },
+            };
+            notes.push(note);
+        }
+        notes
     }
 
     pub fn contract(&self, addr: &alloy_primitives::Address) -> Option<&Contract> {
@@ -193,6 +328,11 @@ impl Layouts {
 
     pub fn is_empty(&self) -> bool {
         self.default.is_none() && self.per.is_empty()
+    }
+
+    /// Any `auto` entry still to resolve?
+    pub fn wants_auto(&self) -> bool {
+        self.auto_default || !self.auto_per.is_empty()
     }
 }
 

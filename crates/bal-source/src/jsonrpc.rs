@@ -236,7 +236,16 @@ impl JsonRpcSource {
             .unwrap_or_default();
         let head_probe = self.probe_block(json!(format!("{:#x}", head.number))).await;
         let old_probe = self.probe_block(json!(format!("{old_number:#x}"))).await;
-        let earliest_probe = self.probe_block(json!("0x1")).await;
+        let bal_since = match head.block_access_list_hash {
+            Some(_) => Some(self.find_bal_fork(head.number).await),
+            None => None,
+        };
+        let earliest_probe = self
+            .probe_block(json!(format!(
+                "{:#x}",
+                bal_since.map(|f| f.block).unwrap_or(1)
+            )))
+            .await;
         let proof_window = self.measure_proof_window(head.number).await;
 
         Ok(ProbeReport {
@@ -246,9 +255,47 @@ impl JsonRpcSource {
             head_fields,
             head_probe,
             old_probe,
+            bal_since,
             earliest_probe,
             proof_window,
         })
+    }
+
+    /// Does the header of `n` carry a BAL hash? `None` when the node does
+    /// not serve that header (pruned history, transport error).
+    async fn has_bal_hash(&self, n: u64) -> Option<bool> {
+        let v = self.raw_block(json!(format!("{n:#x}"))).await.ok()?;
+        Some(parse_header(&v).ok()?.block_access_list_hash.is_some())
+    }
+
+    /// First block whose header carries a BAL hash: the Glamsterdam fork on
+    /// this chain. Bisects headers, ~25 calls; `head` must carry the hash.
+    /// A header the node does not serve counts as "before": pruned history
+    /// is the old end of the chain. If the fork itself lies in that pruned
+    /// range the answer is only an upper bound, and [`BalFork::exact`] says so.
+    pub async fn find_bal_fork(&self, head: u64) -> BalFork {
+        let first = self.has_bal_hash(1).await;
+        if first == Some(true) || head <= 1 {
+            return BalFork {
+                block: 1,
+                exact: first.is_some(),
+            };
+        }
+        // Invariant: `lo` has no hash (or is not served), `hi` has one;
+        // `lo_seen`: `lo`'s header was actually read.
+        let (mut lo, mut hi, mut lo_seen) = (1u64, head, first.is_some());
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            match self.has_bal_hash(mid).await {
+                Some(true) => hi = mid,
+                Some(false) => (lo, lo_seen) = (mid, true),
+                None => (lo, lo_seen) = (mid, false),
+            }
+        }
+        BalFork {
+            block: hi,
+            exact: lo_seen,
+        }
     }
 
     /// Largest distance behind head at which `eth_getProof` still answers.
@@ -318,6 +365,16 @@ pub enum BalProbe {
     Error(String),
 }
 
+/// Where BALs start on a chain, as seen through one node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BalFork {
+    /// First block whose header carries `blockAccessListHash`.
+    pub block: u64,
+    /// `false`: the node does not serve the header just below `block`
+    /// (pruned), so the fork is at `block` or earlier.
+    pub exact: bool,
+}
+
 /// Day-0 findings for one endpoint. Printed by `balq probe`.
 #[derive(Debug, Clone)]
 pub struct ProbeReport {
@@ -333,7 +390,11 @@ pub struct ProbeReport {
     pub head_probe: BalProbe,
     /// Q2: a block `age` blocks back.
     pub old_probe: BalProbe,
-    /// Q2: block 1.
+    /// First block with a BAL hash in its header (the fork); `None` when
+    /// even the head has none.
+    pub bal_since: Option<BalFork>,
+    /// Q2: the fork block ([`ProbeReport::bal_since`]), else block 1 — the
+    /// oldest block that can have a BAL, so "how far back does this node serve".
     pub earliest_probe: BalProbe,
     /// Measured `eth_getProof` window (blocks behind head still served), or
     /// the error if proofs are not served at all.
