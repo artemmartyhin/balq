@@ -1,0 +1,42 @@
+name: release
+
+# Every `v*` tag gets a GitHub Release whose notes are that version's
+# CHANGELOG section. Runs on a tag push (a new release) and on every push to
+# main (backfills any tag still without a release), so it is idempotent.
+# Crates and @balq/viem are published by hand; @balq/node by bal-node.yml
+# on `node-v*` tags.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  releases:
+    name: GitHub releases for v* tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Release every v* tag that has none
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          newest=$(git tag -l 'v*' --sort=-version:refname | head -1)
+          for tag in $(git tag -l 'v*' --sort=version:refname); do
+            if gh release view "$tag" >/dev/null 2>&1; then continue; fi
+            v=${tag#v}
+            awk -v v="$v" '
+              $0 ~ "^## \\[" v "\\]" { on = 1; next }
+              on && /^## / { exit }
+              on && /^\[[0-9]+\.[0-9]+\.[0-9]+\]: / { exit }
+              on { print }
+            ' CHANGELOG.md > notes.md
+            [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
+            latest=false; [ "$tag" = "$newest" ] && latest=true
+            gh release create "$tag" --title "balq $v" --notes-file notes.md --verify-tag --latest="$latest"
+          done

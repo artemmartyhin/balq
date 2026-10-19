@@ -39,6 +39,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --exclude bal-node
 
+  version:
+    name: version bookkeeping
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The workspace version has a CHANGELOG section, every crate depends on
+      # its siblings at that same version, and @balq/viem ships with it.
+      - run: |
+          set -euo pipefail
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "workspace version $v"
+          grep -q "^## \[$v\]" CHANGELOG.md || { echo "CHANGELOG.md has no '## [$v]' section"; exit 1; }
+          bad=$(grep -hoE '\{ version = "[^"]+", path = "\.\./bal-' crates/*/Cargo.toml | grep -v "\"$v\"" || true)
+          [ -z "$bad" ] || { echo "sibling deps not at $v:"; echo "$bad"; exit 1; }
+          grep -q "\"version\": \"$v\"" packages/viem/package.json || { echo "@balq/viem is not at $v"; exit 1; }
+
   msrv:
     name: msrv (1.90)
     runs-on: ubuntu-latest

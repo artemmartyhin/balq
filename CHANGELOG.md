@@ -56,7 +56,7 @@ and the on-disk schema (`SCHEMA_VERSION`).
   mapping and array getters, `latest` served locally while the archive keeps up.
 - `Layouts` in the CLI carry the ABI next to the layout when the file has one.
 
-
+## [0.3.0] — 2026-08-30
 
 ### Added
 - **`balq index --serve`**: reads over HTTP (localhost) while the process holds
@@ -221,3 +221,13 @@ Security release after an independent review (`docs/SECURITY-AUDIT.md`).
 - `balq bench`: live (catch-up sync of the most-written addresses, read
   latency vs `eth_getStorageAt`) and synthetic benchmarks; writes
   `results.json` and SVG charts (`docs/bench/`, method in `docs/BENCH.md`).
+
+[0.5.0]: https://github.com/artemmartyhin/balq/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/artemmartyhin/balq/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/artemmartyhin/balq/compare/v0.2.3...v0.3.0
+[0.2.3]: https://github.com/artemmartyhin/balq/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/artemmartyhin/balq/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/artemmartyhin/balq/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/artemmartyhin/balq/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/artemmartyhin/balq/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/artemmartyhin/balq/releases/tag/v0.1.0
